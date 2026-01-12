@@ -35,6 +35,96 @@ def get_google_route_time(origin_lat, origin_lon, dest_lat, dest_lon, departure_
         "routingPreference": "TRAFFIC_AWARE",
         "departureTime": departure_time_iso 
     }
+# --- AGREGAR AL FINAL DE TU APP.PY ---
+
+def generar_datos_cocacola():
+    """Genera un escenario de prueba masivo para México"""
+    import numpy as np
+    
+    # 1. Red Logística (Nodos Reales)
+    nodes = {
+        101: {'Name': 'Planta Toluca (FEMSA)', 'Lat': 19.2826, 'Lon': -99.6557, 'Type': 'Plant', 'Cap': 12},
+        102: {'Name': 'Planta Monterrey (Topo Chico)', 'Lat': 25.6866, 'Lon': -100.3161, 'Type': 'Plant', 'Cap': 10},
+        103: {'Name': 'Planta Guadalajara', 'Lat': 20.6597, 'Lon': -103.3496, 'Type': 'Plant', 'Cap': 10},
+        104: {'Name': 'Planta Cuautitlán', 'Lat': 19.6734, 'Lon': -99.1755, 'Type': 'Plant', 'Cap': 15},
+        201: {'Name': 'CEDI Iztapalapa', 'Lat': 19.3552, 'Lon': -99.0622, 'Type': 'CEDI', 'Cap': 8},
+        202: {'Name': 'CEDI Puebla', 'Lat': 19.0414, 'Lon': -98.2063, 'Type': 'CEDI', 'Cap': 6},
+        203: {'Name': 'CEDI Veracruz', 'Lat': 19.1738, 'Lon': -96.1342, 'Type': 'CEDI', 'Cap': 5},
+        204: {'Name': 'CEDI Querétaro', 'Lat': 20.5888, 'Lon': -100.3899, 'Type': 'CEDI', 'Cap': 6},
+        205: {'Name': 'CEDI León Bajío', 'Lat': 21.1221, 'Lon': -101.6826, 'Type': 'CEDI', 'Cap': 6},
+        206: {'Name': 'CEDI Mérida', 'Lat': 20.9674, 'Lon': -89.5926, 'Type': 'CEDI', 'Cap': 5},
+        207: {'Name': 'CEDI Tijuana', 'Lat': 32.5149, 'Lon': -117.0382, 'Type': 'CEDI', 'Cap': 5},
+        208: {'Name': 'CEDI Chihuahua', 'Lat': 28.6353, 'Lon': -106.0889, 'Type': 'CEDI', 'Cap': 5},
+        210: {'Name': 'CEDI Acapulco', 'Lat': 16.8531, 'Lon': -99.8237, 'Type': 'CEDI', 'Cap': 4},
+    }
+
+    # Haversine simple para tiempos
+    def get_time(lat1, lon1, lat2, lon2):
+        from math import radians, sin, cos, sqrt, atan2
+        R = 6371
+        dlat, dlon = radians(lat2 - lat1), radians(lon2 - lon1)
+        a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+        c = 2 * atan2(sqrt(a), sqrt(1-a))
+        dist = R * c
+        return max(2.0, round((dist / 60.0) + 1, 1)) # 60km/h + 1h fija
+
+    # 2. Generar 100 Pedidos
+    orders = []
+    plant_ids = [k for k, v in nodes.items() if v['Type'] == 'Plant']
+    cedi_ids = [k for k, v in nodes.items() if v['Type'] == 'CEDI']
+    skills = ['Seco', 'Refrigerado']
+
+    for i in range(1, 101):
+        if np.random.rand() < 0.85: # 85% Planta -> CEDI
+            orig_id, dest_id = np.random.choice(plant_ids), np.random.choice(cedi_ids)
+        else: # 15% Inter-CEDI
+            orig_id = np.random.choice(cedi_ids)
+            dest_id = np.random.choice(cedi_ids)
+            while dest_id == orig_id: dest_id = np.random.choice(cedi_ids)
+        
+        orig, dest = nodes[orig_id], nodes[dest_id]
+        
+        orders.append({
+            'ID': f"KO-MX-{2026000+i}",
+            'Origen_Lat': orig['Lat'], 'Origen_Lon': orig['Lon'],
+            'Destino_Lat': dest['Lat'], 'Destino_Lon': dest['Lon'],
+            'Tiempo_Estimado_Manual_h': get_time(orig['Lat'], orig['Lon'], dest['Lat'], dest['Lon']),
+            'Tiempo_Carga_h': round(np.random.uniform(1.5, 3.0), 1),
+            'Tiempo_Descarga_h': round(np.random.uniform(1.0, 2.5), 1),
+            'Skill_Requerido': np.random.choice(skills, p=[0.8, 0.2]),
+            'Prioridad': np.random.randint(1, 6)
+        })
+
+    # 3. Configuración Muelles
+    muelle_config = []
+    for nid, data in nodes.items():
+        is_plant = data['Type'] == 'Plant'
+        for d in range(1, data['Cap'] + 1):
+            skill = 'Refrigerado' if d > data['Cap']-2 else 'Seco'
+            muelle_config.append({
+                'Nodo_ID': nid, 'Nombre_Nodo': data['Name'],
+                'Muelle_ID': f"M{d}", 'Skill_Soportado': skill,
+                'Horario_Apertura': 0 if is_plant else 6,
+                'Horario_Cierre': 24 if is_plant else 22,
+                'Breaks (Inicio-Fin)': "13-14; 21-22" if is_plant else "13-14"
+            })
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        pd.DataFrame(orders).to_excel(writer, sheet_name='Pedidos', index=False)
+        pd.DataFrame(muelle_config).to_excel(writer, sheet_name='Config_Muelles', index=False)
+    return output.getvalue()
+
+# --- MODIFICACIÓN EN EL SIDEBAR ---
+with st.sidebar:
+    st.divider()
+    st.markdown("### 🇲🇽 Demo Data")
+    if st.button("Generar Escenario Coca-Cola"):
+        data_mx = generar_datos_cocacola()
+        st.download_button("⬇️ Descargar Simulacion_CocaCola.xlsx", data_mx, "Simulacion_CocaCola_MX.xlsx")
+    
+
+    
     
     try:
         response = requests.post(endpoint, json=body, headers=headers)
