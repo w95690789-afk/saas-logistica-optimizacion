@@ -34,7 +34,6 @@ def get_google_route_time(origin_lat, origin_lon, dest_lat, dest_lon, departure_
 
 # --- 2. GENERADOR DE ESCENARIOS (100 PEDIDOS SIEMPRE) ---
 def generar_escenario_pais(pais_seleccionado):
-    # Base de Datos Geoespacial Completa
     DB_PAISES = {
         "Mexico": {
             101: {'Name': 'Planta Toluca', 'Lat': 19.28, 'Lon': -99.65, 'Type': 'Plant', 'Cap': 12},
@@ -69,7 +68,7 @@ def generar_escenario_pais(pais_seleccionado):
     orders = []
     keys = list(nodes.keys())
     
-    # --- CORRECCIÓN: 100 PEDIDOS EXACTOS ---
+    # 100 PEDIDOS EXACTOS
     for i in range(1, 101): 
         orig_id, dest_id = np.random.choice(keys), np.random.choice(keys)
         while dest_id == orig_id: dest_id = np.random.choice(keys)
@@ -81,7 +80,7 @@ def generar_escenario_pais(pais_seleccionado):
             'Destino_Lat': dest['Lat'], 'Destino_Lon': dest['Lon'],
             'Tiempo_Estimado_Manual_h': get_time_approx(orig['Lat'], orig['Lon'], dest['Lat'], dest['Lon']),
             'Tiempo_Carga_h': 2.0, 'Tiempo_Descarga_h': 1.5,
-            'Skill_Requerido': np.random.choice(['Seco', 'Refrigerado'], p=[0.7, 0.3]), 
+            'Skill_Requerido': np.random.choice(['Seco', 'Refrigerado'], p=[0.6, 0.4]), # 40% Refri
             'Prioridad': 1
         })
     
@@ -89,15 +88,19 @@ def generar_escenario_pais(pais_seleccionado):
     for nid, data in nodes.items():
         is_plant = data['Type'] == 'Plant'
         for d in range(1, data['Cap'] + 1):
-            # 50% Turnos Partidos (Caos Realista)
+            # Lógica Caótica de Turnos
             if np.random.rand() < 0.5:
                 ap, cl, brk = 6, 22, "12-14" 
             else:
                 ap, cl, brk = (0, 24, "13-14; 21-22") if is_plant else (7, 19, "13-14")
             
-            # Skills Mixtos
-            r_skill = np.random.rand()
-            skill = 'Mixto' if r_skill > 0.8 else ('Refrigerado' if r_skill > 0.6 else 'Seco')
+            # Lógica de Skills: Asegurar suficiencia
+            # Garantizamos al menos 1 de cada tipo por nodo si es posible, luego aleatorio
+            if d == 1: skill = 'Seco'
+            elif d == 2: skill = 'Refrigerado'
+            else:
+                r = np.random.rand()
+                skill = 'Mixto' if r > 0.7 else ('Refrigerado' if r > 0.5 else 'Seco')
 
             muelle_config.append({
                 'Nodo_ID': nid, 'Nombre_Nodo': data['Name'], 'Muelle_ID': f"M{d}", 
@@ -141,29 +144,28 @@ def audit_schedule(df):
             last_end, last_ord = r['Fin Servicio'], r['Orden']
     return pd.DataFrame(errors)
 
-# --- 4. MOTOR DE OPTIMIZACIÓN (MODO ESTRICTO POR MUELLE) ---
+# --- 4. MOTOR DE OPTIMIZACIÓN (ASIGNACIÓN COMPATIBLE) ---
 def solve_engine(df_pedidos, df_config, use_google, api_key):
     status_ph = st.empty()
-    status_ph.info("⚙️ Iniciando Optimización Estricta (Asignación Individual de Muelles)...")
+    status_ph.info("⚙️ Iniciando Optimización Estricta...")
     
     model = cp_model.CpModel()
-    horizon = 96
+    horizon = 120 # Aumentado para que quepan 100 pedidos
     
-    # 1. PRE-PROCESAMIENTO DE MUELLES INDIVIDUALES
+    # 1. PRE-PROCESAMIENTO DE MUELLES
     nodos_muelles = {}
     
     for _, row in df_config.iterrows():
         nid = row['Nodo_ID']
         mid = row['Muelle_ID']
         skill_m = row['Skill_Soportado']
-        
         if nid not in nodos_muelles: nodos_muelles[nid] = []
         
         intervals_bloqueados = []
         op, cl = row.get('Horario_Apertura', 0), row.get('Horario_Cierre', 24)
         breaks_list = parse_break_string(row.get('Breaks (Inicio-Fin)', ''))
         
-        for day in range(4):
+        for day in range(5): # 5 días horizonte
             off = day * 24
             if op > 0: intervals_bloqueados.append((0+off, op))
             if cl < 24: intervals_bloqueados.append((cl+off, 24-cl))
@@ -173,16 +175,12 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
         
         cp_intervals_bloqueados = []
         for start, dur in intervals_bloqueados:
-            # CORRECCIÓN DE ATTRIBUTE ERROR: Usamos NewIntervalVar (compatible)
-            iv = model.NewIntervalVar(int(start), int(dur), int(start+dur), f"block_{mid}_{start}")
+            iv = model.NewIntervalVar(int(start), int(dur), int(start+dur), f"bk_{mid}_{start}")
             cp_intervals_bloqueados.append(iv)
             
         nodos_muelles[nid].append({
-            'id': mid,
-            'skill': skill_m,
-            'nombre_nodo': row['Nombre_Nodo'],
-            'bloqueos': cp_intervals_bloqueados,
-            'ordenes_asignadas': []
+            'id': mid, 'skill': skill_m, 'nombre_nodo': row['Nombre_Nodo'],
+            'bloqueos': cp_intervals_bloqueados, 'ordenes_asignadas': []
         })
 
     pedidos_vars = []
@@ -202,22 +200,37 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
                 if t_g: route_cache[k] = t_g
             tv = route_cache.get(k, tv)
         
-        tc, td = int(row.get('Tiempo_Carga_h', 2)), int(row.get('Tiempo_Descarga_h', 2))
-        tv = int(tv)
-
+        tc, td, tv = int(row.get('Tiempo_Carga_h', 2)), int(row.get('Tiempo_Descarga_h', 2)), int(tv)
         so, eo = model.NewIntVar(0, horizon, f'so_{pid}'), model.NewIntVar(0, horizon, f'eo_{pid}')
         sd, ed = model.NewIntVar(0, horizon, f'sd_{pid}'), model.NewIntVar(0, horizon, f'ed_{pid}')
-        
         model.Add(sd >= eo + tv)
 
-        # Asignación Heurística para Demo
-        node_keys = list(nodos_muelles.keys())
-        n_orig = node_keys[i % len(node_keys)]
-        n_dest = node_keys[(i+1) % len(node_keys)]
+        # --- ASIGNACIÓN INTELIGENTE DE NODOS (FIX V15) ---
+        # Solo asignar nodos que tengan muelles COMPATIBLES con el skill del pedido
+        def get_compatible_nodes(skill_necesario):
+            candidates = []
+            for nid, muelles in nodos_muelles.items():
+                # Verificar si este nodo tiene al menos 1 muelle compatible
+                if any(m['skill'] in ['Mixto', skill_necesario] for m in muelles):
+                    candidates.append(nid)
+            return candidates
+
+        valid_nodes = get_compatible_nodes(skill_req)
+        
+        if len(valid_nodes) < 2:
+            # Si no hay suficientes nodos para origen y destino, saltar pedido (esto evita errores de indice)
+            continue
+
+        # Distribuir carga (Round Robin sobre nodos válidos)
+        n_orig = valid_nodes[i % len(valid_nodes)]
+        n_dest = valid_nodes[(i+1) % len(valid_nodes)]
+        
+        # Evitar origen == destino
+        if n_orig == n_dest:
+             n_dest = valid_nodes[(i+2) % len(valid_nodes)]
 
         def asignar_a_muelle_posible(nodo_id, start_var, duration, end_var, tipo_op):
             literales_eleccion = []
-            
             for m in nodos_muelles.get(nodo_id, []):
                 if m['skill'] == 'Mixto' or m['skill'] == skill_req:
                     is_in_dock = model.NewBoolVar(f"{pid}_{tipo_op}_in_{m['id']}")
@@ -229,21 +242,14 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
             model.Add(sum(literales_eleccion) == 1)
             return True
 
-        valid_o = asignar_a_muelle_posible(n_orig, so, tc, eo, 'orig')
-        valid_d = asignar_a_muelle_posible(n_dest, sd, td, ed, 'dest')
-        
-        if valid_o and valid_d:
-            pedidos_vars.append({
-                'id': pid, 'vars': (so, eo, sd, ed), 'skill': skill_req,
-                'no': n_orig, 'nd': n_dest
-            })
+        if asignar_a_muelle_posible(n_orig, so, tc, eo, 'orig') and asignar_a_muelle_posible(n_dest, sd, td, ed, 'dest'):
+            pedidos_vars.append({'id': pid, 'vars': (so, eo, sd, ed), 'skill': skill_req, 'no': n_orig, 'nd': n_dest})
 
-    # NO OVERLAP ESTRICTO
+    # NO OVERLAP
     for nid, muelles in nodos_muelles.items():
         for m in muelles:
-            todos_intervalos = m['ordenes_asignadas'] + m['bloqueos']
-            if todos_intervalos:
-                model.AddNoOverlap(todos_intervalos)
+            todos = m['ordenes_asignadas'] + m['bloqueos']
+            if todos: model.AddNoOverlap(todos)
 
     obj = model.NewIntVar(0, horizon, 'mk')
     if pedidos_vars: 
@@ -255,7 +261,7 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
     st_solve = solver.Solve(model)
     
     if st_solve in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        status_ph.success("✅ Solución Estricta Encontrada (Cero Solapamientos)")
+        status_ph.success("✅ Optimización Completada")
         res = []
         for p in pedidos_vars:
             v = p['vars']
@@ -269,7 +275,7 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
         
         return pd.DataFrame(res)
     else:
-        status_ph.error("⚠️ No se pudo agendar. Demasiadas restricciones.")
+        status_ph.error("⚠️ No se pudo agendar (Infeasible).")
         return pd.DataFrame()
 
 # --- 5. POST-PROCESAMIENTO ---
@@ -290,12 +296,13 @@ def asignar_nombres_muelles(df, df_config):
             req_skill = row['Skill']
             best_dock = None
             
+            # Buscar el muelle que fue asignado lógicamente (Reconstrucción)
             for mid, state in docks_state.items():
                 if state['skill'] in ['Mixto', req_skill]:
                     if start >= state['free_at']:
                         choque_break = False
                         for b_s, b_e in state['breaks']:
-                            for d in range(4):
+                            for d in range(5):
                                 off = d*24
                                 if not (end <= (b_s+off) or start >= (b_e+off)): choque_break = True
                         if not choque_break:
@@ -306,11 +313,9 @@ def asignar_nombres_muelles(df, df_config):
                 docks_state[best_dock]['free_at'] = end
                 df_out.at[idx, 'Etiqueta Muelle'] = best_dock
             else:
-                # Si esto pasa, es porque el mapeo visual no coincidió exactamente con la lógica booleana del solver
-                # pero el solver ya garantizó que hay espacio. Asignamos al que cause menor impacto visual.
-                best_dock = min(docks_state.keys(), key=lambda k: docks_state[k]['free_at'])
-                docks_state[best_dock]['free_at'] = end
-                df_out.at[idx, 'Etiqueta Muelle'] = best_dock
+                best_fallback = min(docks_state.keys(), key=lambda k: docks_state[k]['free_at'])
+                docks_state[best_fallback]['free_at'] = end
+                df_out.at[idx, 'Etiqueta Muelle'] = best_fallback # Fallback visual
                 
     return df_out
 
@@ -327,7 +332,7 @@ with st.sidebar:
     if api: st.session_state['api_key'] = api
     use_g = st.checkbox("Tráfico Real", value=False, disabled=not bool(api))
 
-st.title("🚛 SaaS Logístico T1 Estricto")
+st.title("🚛 SaaS Logístico LATAM T1")
 f = st.file_uploader("Cargar Archivo", type=['xlsx'])
 
 if f:
@@ -345,12 +350,10 @@ if st.session_state['results_df'] is not None:
     df = st.session_state['results_df']
     st.divider()
     
-    # AUDITORÍA
     errs = audit_schedule(df)
     if errs.empty: st.success("✅ CERO SOLAPAMIENTOS CONFIRMADO")
     else: st.error(f"❌ {len(errs)} Errores Visuales"); st.dataframe(errs)
     
-    # --- RECUPERACIÓN DE TODAS LAS PESTAÑAS (4 TABS) ---
     t1, t2, t3, t4 = st.tabs(["🏭 Gantt General", "📦 Rastreo Pedidos", "🔬 Inspector de Muelles", "📥 Exportar"])
     
     with t1:
@@ -360,12 +363,13 @@ if st.session_state['results_df'] is not None:
         ).properties(width=700).interactive()
         st.altair_chart(c)
         
-    with t2: # Tablero de Pedidos (Restaurado)
-        st.markdown("##### 🔎 Rastrear Pedido Específico")
+    with t2:
+        st.markdown("##### 🔎 Rastrear Pedidos")
         all_orders = sorted(df['Orden'].unique())
         sel_order = st.multiselect("Buscar ID de Pedido:", all_orders)
         
-        df_view = df[df['Orden'].isin(sel_order)] if sel_order else df.head(20) # Mostrar primeros 20 si no hay filtro
+        # CORRECCIÓN: Mostrar TODO si no hay selección
+        df_view = df[df['Orden'].isin(sel_order)] if sel_order else df 
         
         c = alt.Chart(df_view).mark_bar().encode(
             x='Inicio Servicio', x2='Fin Servicio', y='Orden', color='Tipo',
@@ -373,7 +377,7 @@ if st.session_state['results_df'] is not None:
         ).properties(width=700).interactive()
         st.altair_chart(c)
 
-    with t3: # Inspector con Filtro de Muelles (Restaurado y Mejorado)
+    with t3:
         col_n, col_m = st.columns(2)
         with col_n:
             n = st.selectbox("Seleccionar Nodo:", df['Nodo'].unique())
@@ -382,7 +386,6 @@ if st.session_state['results_df'] is not None:
         muelles_nodo = sorted(dn['Etiqueta Muelle'].unique())
         
         with col_m:
-            # FILTRO DE MUELLES (NUEVO)
             sel_muelles = st.multiselect("Filtrar Muelles Específicos:", muelles_nodo, default=muelles_nodo)
             
         if sel_muelles:
