@@ -40,42 +40,26 @@ def smart_load(file):
         return pd.DataFrame()
 
 def audit_schedule(df):
-    """
-    Revisa matemáticamente si hay solapamientos en algún muelle.
-    Retorna: (Status Booleano, DataFrame de Errores)
-    """
     errors = []
-    # Agrupar por Nodo y Muelle para revisar carril por carril
     grouped = df.groupby(['Nodo', 'Muelle'])
-    
     for (nodo, muelle), group in grouped:
-        # Ordenar por hora de inicio
         group = group.sort_values('Inicio Servicio')
         last_end = -1
         last_order = None
-        
         for idx, row in group.iterrows():
             start = row['Inicio Servicio']
-            end = row['Fin Servicio']
-            order = row['Orden']
-            
-            # Tolerancia de 0.001 para errores de punto flotante
             if start < (last_end - 0.001):
                 errors.append({
-                    'Nodo': nodo,
-                    'Muelle': muelle,
+                    'Nodo': nodo, 'Muelle': muelle,
                     'Conflicto': f"Pedido {last_order} vs {order}",
-                    'Detalle': f"Fin A: {format_time(last_end)} > Inicio B: {format_time(start)}"
+                    'Detalle': f"Choque de horarios"
                 })
-            
-            last_end = end
-            last_order = order
-            
-    if len(errors) > 0:
-        return False, pd.DataFrame(errors)
+            last_end = row['Fin Servicio']
+            last_order = row['Orden']
+    if len(errors) > 0: return False, pd.DataFrame(errors)
     return True, pd.DataFrame()
 
-# --- MOTOR DE OPTIMIZACIÓN (OR-TOOLS) ---
+# --- MOTOR DE OPTIMIZACIÓN ---
 def solve_logistics_engine(df_raw):
     status_text = st.empty()
     status_text.info("⚙️ Iniciando motor de optimización Google OR-Tools...")
@@ -97,8 +81,6 @@ def solve_logistics_engine(df_raw):
     model = cp_model.CpModel()
     horizon = 72 
     pedidos = []
-    
-    # UNIFICACIÓN DE RECURSOS (Anti-Colisión)
     recursos_nodo = {} 
 
     for index, row in df_pedidos.iterrows():
@@ -122,10 +104,8 @@ def solve_logistics_engine(df_raw):
         
         model.Add(start_d >= end_o + t_viaje)
         
-        # METER CARGAS Y DESCARGAS EN LA MISMA BOLSA
         if nodo_orig not in recursos_nodo: recursos_nodo[nodo_orig] = []
         recursos_nodo[nodo_orig].append(interval_o)
-        
         if nodo_dest not in recursos_nodo: recursos_nodo[nodo_dest] = []
         recursos_nodo[nodo_dest].append(interval_d)
         
@@ -155,13 +135,12 @@ def solve_logistics_engine(df_raw):
             results.append({'Orden': pid, 'Tipo': 'Destino', 'Nodo': p['data'].get('destino'), 'Muelle': 1, 'Inicio Servicio': sd, 'Fin Servicio': ed, 'Batch': '1/1'})
         return pd.DataFrame(results)
     else:
-        status_text.error("⚠️ Saturación: No es posible agendar sin choques. Aumenta el horizonte de tiempo.")
+        status_text.error("⚠️ Saturación: Aumenta el horizonte de tiempo.")
         return pd.DataFrame()
 
 # --- INTERFAZ DE USUARIO ---
 
-st.title("🚛 Sistema de Asignación de Muelles (SaaS)")
-st.markdown("Optimización logística inteligente con Google OR-Tools.")
+st.title("🚛 SaaS Logístico T1")
 
 uploaded_file = st.file_uploader("Cargar archivo de datos (Excel)", type=["xlsx", "xls"])
 
@@ -177,87 +156,109 @@ if uploaded_file:
                 results_df['Hora Salida'] = results_df['Fin Servicio'].apply(format_time)
                 results_df['Etiqueta Nodo'] = "Nodo " + results_df['Nodo'].astype(str)
                 results_df['Etiqueta Muelle'] = "Muelle " + results_df['Muelle'].astype(str)
+                # Crear columna 'Etiqueta Pedido' para el eje Y
+                results_df['Etiqueta Pedido'] = "Pedido #" + results_df['Orden'].astype(str)
                 st.session_state['results_df'] = results_df
         
         if st.session_state['results_df'] is not None:
             results_df = st.session_state['results_df']
             
             st.divider()
-            
-            # --- SECCIÓN DE AUDITORÍA AUTOMÁTICA ---
             is_valid, error_df = audit_schedule(results_df)
-            
-            if is_valid:
-                st.success("✅ AUDITORÍA APROBADA: El algoritmo verificó que NO existen solapamientos en ningún muelle.")
-            else:
-                st.error(f"❌ ALERTA DE COLISIÓN: Se detectaron {len(error_df)} conflictos de horario.")
-                st.dataframe(error_df)
-            
-            # ---------------------------------------
+            if is_valid: st.success("✅ AUDITORÍA APROBADA: 0 Colisiones.")
+            else: st.error(f"❌ ALERTA: {len(error_df)} Conflictos detectados.")
 
-            st.subheader("🎯 Dashboard de Operaciones")
-            
             kpi1, kpi2, kpi3 = st.columns(3)
-            kpi1.metric("Total Pedidos", results_df['Orden'].nunique())
-            kpi2.metric("Nodos Activos", results_df['Nodo'].nunique())
-            kpi3.metric("Última Entrega", results_df['Hora Salida'].max())
+            kpi1.metric("Pedidos", results_df['Orden'].nunique())
+            kpi2.metric("Nodos", results_df['Nodo'].nunique())
+            kpi3.metric("Makespan (Horas)", results_df['Fin Servicio'].max())
 
-            tab1, tab2, tab3, tab4 = st.tabs(["🌍 Visión Global", "🔬 Inspector de Nodos", "📋 Tabla Datos", "📥 Exportar"])
+            # --- PESTAÑAS PRINCIPALES ---
+            tab_nodos, tab_pedidos, tab_calor, tab_inspector, tab_datos = st.tabs([
+                "🏭 Gantt Nodos", 
+                "📦 Rastreo Pedidos (Nuevo)", 
+                "🔥 Mapa de Calor",
+                "🔬 Inspector", 
+                "📥 Exportar"
+            ])
 
-            with tab1:
-                st.caption("Eje Y: Nodo | Eje X: Tiempo. Altura dinámica automática.")
-                n_nodos = results_df['Nodo'].nunique()
-                chart_height = max(400, n_nodos * 30)
-                
-                chart_global = alt.Chart(results_df).mark_bar(opacity=0.7).encode(
-                    x=alt.X('Inicio Servicio', title='Hora Operativa'),
+            # 1. GANTT POR NODOS (Visión de Patio)
+            with tab_nodos:
+                st.caption("Planificación desde la perspectiva del Almacén.")
+                h_nodos = max(400, results_df['Nodo'].nunique() * 30)
+                chart_nodos = alt.Chart(results_df).mark_bar(opacity=0.7).encode(
+                    x=alt.X('Inicio Servicio', title='Hora'),
                     x2='Fin Servicio',
-                    y=alt.Y('Etiqueta Nodo', sort='ascending', title='Ubicación'),
-                    color=alt.Color('Tipo', scale=alt.Scale(domain=['Origen', 'Destino'], range=['#3b8ed0', '#e0553d'])),
-                    tooltip=['Orden', 'Hora Entrada', 'Hora Salida', 'Etiqueta Nodo']
-                ).properties(height=chart_height).interactive()
-                st.altair_chart(chart_global, use_container_width=True)
-
-            with tab2:
-                # INTEGRACIÓN DEL STATUS EN LA PESTAÑA INSPECTOR TAMBIÉN
-                st.markdown("### 🔎 Auditoría de Nodos")
-                
-                if not is_valid:
-                    st.warning("⚠️ Atención: Revisa los nodos con conflictos listados arriba.")
-
-                col_filt, col_info = st.columns([1, 3])
-                with col_filt:
-                    lista_nodos = sorted(results_df['Nodo'].unique())
-                    nodo_sel = st.selectbox("Seleccionar Nodo a Auditar:", lista_nodos)
-                
-                df_nodo = results_df[results_df['Nodo'] == nodo_sel].copy()
-                
-                with col_info:
-                    kpi_n1, kpi_n2 = st.columns(2)
-                    kpi_n1.metric(f"Operaciones en Nodo {nodo_sel}", len(df_nodo))
-                    ocupacion_h = (df_nodo['Fin Servicio'] - df_nodo['Inicio Servicio']).sum()
-                    kpi_n2.metric("Horas Totales Ocupadas", f"{ocupacion_h:.1f} hrs")
-
-                st.markdown("#### Cronograma Detallado del Nodo")
-                
-                chart_nodo = alt.Chart(df_nodo).mark_bar().encode(
-                    x=alt.X('Inicio Servicio', title='Horas'),
-                    x2='Fin Servicio',
-                    y=alt.Y('Etiqueta Muelle', title='Carril'),
+                    y=alt.Y('Etiqueta Nodo', sort='ascending'),
                     color='Tipo',
-                    tooltip=['Orden', 'Hora Entrada', 'Hora Salida', 'Tipo']
-                ).properties(height=300)
-                st.altair_chart(chart_nodo, use_container_width=True)
+                    tooltip=['Orden', 'Hora Entrada']
+                ).properties(height=h_nodos).interactive()
+                st.altair_chart(chart_nodos, use_container_width=True)
+
+            # 2. GANTT POR PEDIDOS (Visión de Tráfico) - NUEVO
+            with tab_pedidos:
+                st.markdown("### 🚛 Ciclo de Vida del Pedido")
+                st.caption("Aquí puedes ver el viaje completo: La barra azul es la carga, el espacio vacío es el viaje, y la barra roja es la descarga.")
                 
-                st.dataframe(df_nodo.sort_values('Inicio Servicio')[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']], use_container_width=True)
+                # Filtro opcional
+                pedidos_list = sorted(results_df['Orden'].unique())
+                sel_pedidos = st.multiselect("Filtrar Pedidos Específicos (Dejar vacío para ver todos)", pedidos_list)
+                
+                df_view_ped = results_df if not sel_pedidos else results_df[results_df['Orden'].isin(sel_pedidos)]
+                
+                # Altura dinámica
+                h_pedidos = max(400, df_view_ped['Orden'].nunique() * 25)
+                
+                chart_pedidos = alt.Chart(df_view_ped).mark_bar().encode(
+                    x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
+                    x2='Fin Servicio',
+                    y=alt.Y('Etiqueta Pedido', sort='ascending', title='ID Pedido'),
+                    color=alt.Color('Tipo', scale=alt.Scale(range=['#3b8ed0', '#e0553d'])), # Azul y Rojo
+                    tooltip=['Orden', 'Etiqueta Nodo', 'Hora Entrada', 'Hora Salida']
+                ).properties(height=h_pedidos).interactive()
+                
+                st.altair_chart(chart_pedidos, use_container_width=True)
 
-            with tab3:
-                st.dataframe(results_df, use_container_width=True)
+            # 3. MAPA DE CALOR (Visión de Capacidad) - NUEVO
+            with tab_calor:
+                st.markdown("### 🔥 Zonas de Alta Congestión")
+                st.caption("Muestra cuántos camiones hay simultáneamente en cada nodo por hora.")
+                
+                # Preparamos datos para heatmap (contar ocurrencias por hora)
+                # Simplificación: Tomamos la hora de inicio truncada
+                df_heat = results_df.copy()
+                df_heat['Hora_Simple'] = df_heat['Inicio Servicio'].astype(int)
+                heat_data = df_heat.groupby(['Etiqueta Nodo', 'Hora_Simple']).size().reset_index(name='Camiones')
+                
+                chart_heat = alt.Chart(heat_data).mark_rect().encode(
+                    x=alt.X('Hora_Simple:O', title='Hora del Día'),
+                    y=alt.Y('Etiqueta Nodo', title='Nodo'),
+                    color=alt.Color('Camiones', scale=alt.Scale(scheme='orangered')),
+                    tooltip=['Etiqueta Nodo', 'Hora_Simple', 'Camiones']
+                ).properties(height=500)
+                
+                st.altair_chart(chart_heat, use_container_width=True)
 
-            with tab4:
+            # 4. INSPECTOR (Auditoría)
+            with tab_inspector:
+                st.markdown("### 🔎 Lupa de Muelles")
+                n_sel = st.selectbox("Seleccionar Nodo:", sorted(results_df['Nodo'].unique()))
+                df_n = results_df[results_df['Nodo'] == n_sel]
+                
+                chart_n = alt.Chart(df_n).mark_bar().encode(
+                    x='Inicio Servicio', x2='Fin Servicio',
+                    y='Etiqueta Muelle', color='Tipo',
+                    tooltip=['Orden', 'Hora Entrada']
+                ).properties(height=300)
+                st.altair_chart(chart_n, use_container_width=True)
+                st.dataframe(df_n.sort_values('Inicio Servicio')[['Orden','Tipo','Hora Entrada','Etiqueta Muelle']], use_container_width=True)
+
+            # 5. EXPORTAR
+            with tab_datos:
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     results_df.to_excel(writer, index=False)
-                st.download_button("Descargar Excel Maestro", output.getvalue(), "Plan_Logistico_Full.xlsx")
+                st.download_button("Descargar Excel Full", output.getvalue(), "Plan_Maestro.xlsx")
+
     else:
         st.error("Error leyendo el archivo.")
