@@ -3,6 +3,7 @@ import pandas as pd
 import altair as alt
 from ortools.sat.python import cp_model
 import io
+import math # Nuevo import para cálculos de redondeo
 from datetime import datetime, timedelta
 
 # --- CONFIGURACIÓN DE PÁGINA ---
@@ -51,7 +52,7 @@ def audit_schedule(df):
             if start < (last_end - 0.001):
                 errors.append({
                     'Nodo': nodo, 'Muelle': muelle,
-                    'Conflicto': f"Pedido {last_order} vs {order}",
+                    'Conflicto': f"Pedido {last_order} vs {row['Orden']}",
                     'Detalle': f"Choque de horarios"
                 })
             last_end = row['Fin Servicio']
@@ -130,7 +131,6 @@ def solve_logistics_engine(df_raw):
         for p in pedidos:
             pid = p['id']
             so, eo, sd, ed = solver.Value(p['vars'][0]), solver.Value(p['vars'][1]), solver.Value(p['vars'][2]), solver.Value(p['vars'][3])
-            
             results.append({'Orden': pid, 'Tipo': 'Origen', 'Nodo': p['data'].get('origen'), 'Muelle': 1, 'Inicio Servicio': so, 'Fin Servicio': eo, 'Batch': '1/1'})
             results.append({'Orden': pid, 'Tipo': 'Destino', 'Nodo': p['data'].get('destino'), 'Muelle': 1, 'Inicio Servicio': sd, 'Fin Servicio': ed, 'Batch': '1/1'})
         return pd.DataFrame(results)
@@ -156,7 +156,6 @@ if uploaded_file:
                 results_df['Hora Salida'] = results_df['Fin Servicio'].apply(format_time)
                 results_df['Etiqueta Nodo'] = "Nodo " + results_df['Nodo'].astype(str)
                 results_df['Etiqueta Muelle'] = "Muelle " + results_df['Muelle'].astype(str)
-                # Crear columna 'Etiqueta Pedido' para el eje Y
                 results_df['Etiqueta Pedido'] = "Pedido #" + results_df['Orden'].astype(str)
                 st.session_state['results_df'] = results_df
         
@@ -173,18 +172,17 @@ if uploaded_file:
             kpi2.metric("Nodos", results_df['Nodo'].nunique())
             kpi3.metric("Makespan (Horas)", results_df['Fin Servicio'].max())
 
-            # --- PESTAÑAS PRINCIPALES ---
             tab_nodos, tab_pedidos, tab_calor, tab_inspector, tab_datos = st.tabs([
                 "🏭 Gantt Nodos", 
-                "📦 Rastreo Pedidos (Nuevo)", 
-                "🔥 Mapa de Calor",
+                "📦 Rastreo Pedidos", 
+                "🔥 Mapa de Calor (Corregido)",
                 "🔬 Inspector", 
                 "📥 Exportar"
             ])
 
-            # 1. GANTT POR NODOS (Visión de Patio)
+            # 1. GANTT NODOS
             with tab_nodos:
-                st.caption("Planificación desde la perspectiva del Almacén.")
+                st.caption("Visión de Patio: Ocupación general.")
                 h_nodos = max(400, results_df['Nodo'].nunique() * 30)
                 chart_nodos = alt.Chart(results_df).mark_bar(opacity=0.7).encode(
                     x=alt.X('Inicio Servicio', title='Hora'),
@@ -195,54 +193,65 @@ if uploaded_file:
                 ).properties(height=h_nodos).interactive()
                 st.altair_chart(chart_nodos, use_container_width=True)
 
-            # 2. GANTT POR PEDIDOS (Visión de Tráfico) - NUEVO
+            # 2. GANTT PEDIDOS
             with tab_pedidos:
                 st.markdown("### 🚛 Ciclo de Vida del Pedido")
-                st.caption("Aquí puedes ver el viaje completo: La barra azul es la carga, el espacio vacío es el viaje, y la barra roja es la descarga.")
-                
-                # Filtro opcional
                 pedidos_list = sorted(results_df['Orden'].unique())
-                sel_pedidos = st.multiselect("Filtrar Pedidos Específicos (Dejar vacío para ver todos)", pedidos_list)
-                
+                sel_pedidos = st.multiselect("Filtrar Pedidos (Opcional)", pedidos_list)
                 df_view_ped = results_df if not sel_pedidos else results_df[results_df['Orden'].isin(sel_pedidos)]
                 
-                # Altura dinámica
                 h_pedidos = max(400, df_view_ped['Orden'].nunique() * 25)
-                
                 chart_pedidos = alt.Chart(df_view_ped).mark_bar().encode(
-                    x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
+                    x=alt.X('Inicio Servicio', title='Horas'),
                     x2='Fin Servicio',
-                    y=alt.Y('Etiqueta Pedido', sort='ascending', title='ID Pedido'),
-                    color=alt.Color('Tipo', scale=alt.Scale(range=['#3b8ed0', '#e0553d'])), # Azul y Rojo
+                    y=alt.Y('Etiqueta Pedido', sort='ascending'),
+                    color=alt.Color('Tipo', scale=alt.Scale(range=['#3b8ed0', '#e0553d'])),
                     tooltip=['Orden', 'Etiqueta Nodo', 'Hora Entrada', 'Hora Salida']
                 ).properties(height=h_pedidos).interactive()
-                
                 st.altair_chart(chart_pedidos, use_container_width=True)
 
-            # 3. MAPA DE CALOR (Visión de Capacidad) - NUEVO
+            # 3. MAPA DE CALOR (CORREGIDO: Lógica Acumulativa)
             with tab_calor:
-                st.markdown("### 🔥 Zonas de Alta Congestión")
-                st.caption("Muestra cuántos camiones hay simultáneamente en cada nodo por hora.")
+                st.markdown("### 🔥 Densidad de Tráfico por Nodo")
+                st.caption("Intensidad de color = Cantidad de camiones simultáneos en el nodo.")
                 
-                # Preparamos datos para heatmap (contar ocurrencias por hora)
-                # Simplificación: Tomamos la hora de inicio truncada
-                df_heat = results_df.copy()
-                df_heat['Hora_Simple'] = df_heat['Inicio Servicio'].astype(int)
-                heat_data = df_heat.groupby(['Etiqueta Nodo', 'Hora_Simple']).size().reset_index(name='Camiones')
+                # --- LÓGICA DE EXPANSIÓN POR HORA ---
+                # Si un camión está de 10 a 13, cuenta para las horas 10, 11 y 12.
+                heatmap_rows = []
+                for _, row in results_df.iterrows():
+                    start_h = int(math.floor(row['Inicio Servicio']))
+                    end_h = int(math.ceil(row['Fin Servicio']))
+                    
+                    # Evitar rango vacío si dura menos de 1h
+                    if end_h == start_h: end_h += 1
+                    
+                    for h in range(start_h, end_h):
+                        heatmap_rows.append({
+                            'Etiqueta Nodo': row['Etiqueta Nodo'],
+                            'Hora del Día': h,
+                            'Ocupación': 1 # Un camión
+                        })
                 
-                chart_heat = alt.Chart(heat_data).mark_rect().encode(
-                    x=alt.X('Hora_Simple:O', title='Hora del Día'),
-                    y=alt.Y('Etiqueta Nodo', title='Nodo'),
-                    color=alt.Color('Camiones', scale=alt.Scale(scheme='orangered')),
-                    tooltip=['Etiqueta Nodo', 'Hora_Simple', 'Camiones']
-                ).properties(height=500)
-                
-                st.altair_chart(chart_heat, use_container_width=True)
+                if heatmap_rows:
+                    df_heat_expanded = pd.DataFrame(heatmap_rows)
+                    # Agrupar para sumar camiones por hora y nodo
+                    heat_data = df_heat_expanded.groupby(['Etiqueta Nodo', 'Hora del Día']).size().reset_index(name='Total Camiones')
+                    
+                    chart_heat = alt.Chart(heat_data).mark_rect().encode(
+                        x=alt.X('Hora del Día:O', title='Hora Operativa'),
+                        y=alt.Y('Etiqueta Nodo', title='Ubicación'),
+                        color=alt.Color('Total Camiones', scale=alt.Scale(scheme='orangered'), legend=alt.Legend(title="Camiones Simultáneos")),
+                        tooltip=['Etiqueta Nodo', 'Hora del Día', 'Total Camiones']
+                    ).properties(height=500)
+                    
+                    st.altair_chart(chart_heat, use_container_width=True)
+                else:
+                    st.info("No hay datos suficientes para generar el mapa de calor.")
 
-            # 4. INSPECTOR (Auditoría)
+            # 4. INSPECTOR
             with tab_inspector:
-                st.markdown("### 🔎 Lupa de Muelles")
-                n_sel = st.selectbox("Seleccionar Nodo:", sorted(results_df['Nodo'].unique()))
+                st.markdown("### 🔎 Auditoría de Nodo")
+                n_sel = st.selectbox("Nodo:", sorted(results_df['Nodo'].unique()))
                 df_n = results_df[results_df['Nodo'] == n_sel]
                 
                 chart_n = alt.Chart(df_n).mark_bar().encode(
@@ -258,7 +267,7 @@ if uploaded_file:
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     results_df.to_excel(writer, index=False)
-                st.download_button("Descargar Excel Full", output.getvalue(), "Plan_Maestro.xlsx")
+                st.download_button("Descargar Plan Maestro", output.getvalue(), "Plan_Maestro.xlsx")
 
     else:
         st.error("Error leyendo el archivo.")
