@@ -189,7 +189,7 @@ if uploaded_file:
 
                 with tab1:
                     st.write("### Cronograma de Operaciones")
-                    # Gráfica Gantt 
+                    # Gráfica Gantt
                     chart = alt.Chart(results_df).mark_bar().encode(
                         x=alt.X('Inicio Servicio', title='Hora (Formato 24h)'),
                         x2='Fin Servicio',
