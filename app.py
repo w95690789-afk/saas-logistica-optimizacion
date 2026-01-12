@@ -205,7 +205,7 @@ if uploaded_file:
                     st.altair_chart(chart_nodo, use_container_width=True)
                     
                     # Tabla pequeña de ese nodo
-                    st.dataframe(df_nodo[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']].sort_values('Inicio Servicio'), use_container_width=True)
+                    st.dataframe(df_nodo.sort_values('Inicio Servicio')[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']], use_container_width=True)
 
                 # TAB 3: TABLA GENERAL
                 with tab3:
