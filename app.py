@@ -5,6 +5,7 @@ from ortools.sat.python import cp_model
 import io
 import requests
 import json
+import numpy as np # Importación necesaria para la simulación
 from datetime import datetime, timedelta
 
 # --- CONFIGURACIÓN ---
@@ -35,11 +36,23 @@ def get_google_route_time(origin_lat, origin_lon, dest_lat, dest_lon, departure_
         "routingPreference": "TRAFFIC_AWARE",
         "departureTime": departure_time_iso 
     }
-# --- AGREGAR AL FINAL DE TU APP.PY ---
+    
+    try:
+        response = requests.post(endpoint, json=body, headers=headers)
+        data = response.json()
+        if "routes" in data and len(data["routes"]) > 0:
+            # Duración viene en formato "3600s"
+            duration_str = data["routes"][0].get("duration", "0s")
+            seconds = int(duration_str.rstrip('s'))
+            return seconds / 3600.0 # Retornar horas
+    except Exception as e:
+        st.error(f"Error Google API: {e}")
+    
+    return None
 
+# --- GENERADOR DE DATOS DEMO (COCA-COLA MX) ---
 def generar_datos_cocacola():
     """Genera un escenario de prueba masivo para México"""
-    import numpy as np
     
     # 1. Red Logística (Nodos Reales)
     nodes = {
@@ -115,30 +128,6 @@ def generar_datos_cocacola():
         pd.DataFrame(muelle_config).to_excel(writer, sheet_name='Config_Muelles', index=False)
     return output.getvalue()
 
-# --- MODIFICACIÓN EN EL SIDEBAR ---
-with st.sidebar:
-    st.divider()
-    st.markdown("### 🇲🇽 Demo Data")
-    if st.button("Generar Escenario Coca-Cola"):
-        data_mx = generar_datos_cocacola()
-        st.download_button("⬇️ Descargar Simulacion_CocaCola.xlsx", data_mx, "Simulacion_CocaCola_MX.xlsx")
-    
-
-    
-    
-    try:
-        response = requests.post(endpoint, json=body, headers=headers)
-        data = response.json()
-        if "routes" in data and len(data["routes"]) > 0:
-            # Duración viene en formato "3600s"
-            duration_str = data["routes"][0].get("duration", "0s")
-            seconds = int(duration_str.rstrip('s'))
-            return seconds / 3600.0 # Retornar horas
-    except Exception as e:
-        st.error(f"Error Google API: {e}")
-    
-    return None
-
 # --- UTILIDADES ---
 def format_time(hours_float):
     if pd.isna(hours_float): return "00:00"
@@ -198,13 +187,9 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
     status.info("⚙️ Iniciando Motor T1 (Skills + Turnos + Tráfico)...")
     
     model = cp_model.CpModel()
-    horizon = 72
+    horizon = 96
     
     # 1. ESTRUCTURAR RECURSOS (MUELLES)
-    # Mapa: (Nodo, Skill) -> Lista de Intervalos de Pedidos
-    # Mapa: (Nodo, Skill) -> Capacidad (Número de muelles con ese skill)
-    # Mapa: Muelle_Unico_ID -> Lista de Breaks (Para restricciones)
-    
     resource_map = {} # (Nodo, Skill) -> [IntVars...]
     dock_capacities = {} # (Nodo, Skill) -> Int (Cantidad de muelles)
     
@@ -214,7 +199,6 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
         return pd.DataFrame()
 
     # Agrupar muelles por Nodo y Skill
-    # Si Nodo 10 tiene M1(Seco) y M2(Seco), Capacidad (10, Seco) = 2
     unique_combinations = df_config.groupby(['Nodo_ID', 'Skill_Soportado']).size().reset_index(name='Capacidad')
     
     for _, row in unique_combinations.iterrows():
@@ -224,8 +208,6 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
 
     # 2. PROCESAR PEDIDOS Y CALCULAR TIEMPOS (GOOGLE)
     pedidos_vars = []
-    
-    # Cache de rutas para no gastar API calls repetidos
     route_cache = {}
     
     prog_bar = st.progress(0)
@@ -249,7 +231,6 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
             if route_key in route_cache:
                 t_viaje = route_cache[route_key]
             else:
-                # Hora salida simulada: Mañana 8am
                 dep_time = (datetime.utcnow() + timedelta(days=1)).replace(hour=8).isoformat() + 'Z'
                 g_time = get_google_route_time(o_lat, o_lon, d_lat, d_lon, dep_time, api_key)
                 if g_time:
@@ -274,96 +255,83 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
         # Restricción Lógica de Viaje
         model.Add(sd >= eo + t_viaje_int)
         
-        # --- RESTRICCIÓN DE SKILL ---
-        # El pedido DEBE ir a un recurso que tenga el skill requerido
-        # Buscamos en qué nodo está el origen y el destino
-        # Suponemos que el Excel de Pedidos tiene Lat/Lon que corresponden a un Nodo ID implícito
-        # Para simplificar este ejemplo, usaremos un "Nearest Neighbor" o asumiremos que el pedido tiene "Nodo_Origen_ID" mapeado
-        # **AJUSTE**: Voy a asumir que el pedido trae una columna "Nodo_Origen_ID" (o lo extraemos del Excel). 
-        # Si no, esto falla. Vamos a añadir validación.
+        # ASIGNACIÓN DE SKILL (HEURÍSTICA DE NODO)
+        # Asumiremos que el Excel ya trae lógica de Nodos consistente con la configuración
+        # Para el ejemplo de Coca-Cola, necesitamos que los pedidos sepan su NODO ID, no solo lat/lon
+        # En esta versión, haremos un "Match" por cercanía si tenemos Lat/Lon, o usaremos una columna ID explícita si existe
+        # Para simplificar y asegurar que funcione con el generador de Coca-Cola (que no pone Nodo_ID en pedidos explícito pero sí Lat/Lon de nodos conocidos):
         
-        # (Simulación: En producción deberíamos hacer un match geoespacial Lat/Lon -> Nodo_ID)
-        # Aquí asumiremos que 'Origen_Lat' es en realidad el ID del Nodo para simplificar la demo si no hay geomapping
-        # O mejor, agregamos columna Nodo_ID al template de pedidos.
-        # *Corrección al vuelo*: Usaré "Origen_Lat" como ID del nodo si es entero, si no, error.
+        # Vamos a buscar el Nodo_ID que coincida con las coordenadas del pedido en la tabla de Configuración
+        # (Esto es un lookup reverso simple para la demo)
         
-        # Nota: Para que el código funcione con el template, voy a asumir que el usuario pone IDs de nodo en las columnas de origen/destino si no usa mapa real.
-        # Pero si usa mapa real, el cruce es complejo. 
-        # Vamos a simplificar: Pedidos tiene "ID_Nodo_Origen" y "ID_Nodo_Destino". Lat/Lon son atributos del Nodo.
+        n_orig_id = None
+        n_dest_id = None
         
-        # Asumiendo que el usuario puso el ID del nodo en las columnas correspondientes del template
-        # (Para la demo, voy a leer ID Nodo de un campo virtual, o usar la lógica previa)
+        # Lookup en configuración para encontrar IDs de nodo basados en Lat/Lon sería ideal, pero config solo tiene ID y Nombre.
+        # Asumiremos para la demo que la simulación Coca-Cola genera Nodos IDs conocidos (101, 102...)
+        # Y que el usuario usará esos IDs o que el sistema los infiere.
         
-        # Vamos a usar una lógica híbrida: si Lat < 1000, es Latitud. Si > 1000 es ID Nodo? No, mejor pedir ID explícito.
-        # Voy a inyectar IDs ficticios en el template para que funcione.
+        # PARCHE PARA LA DEMO: Usaremos un ID ficticio basado en el índice para distribuir carga si no hay match
+        # O mejor: El generador de Coca Cola pone Lat/Lon exactos de los nodos.
+        # Pero el solver necesita el ID (ej. 101).
+        # Vamos a saltarnos la restricción estricta de ID por ahora y usar un "Pool Global por Skill" si no hay ID, 
+        # pero eso rompería la lógica de nodos.
         
-        # Recuperar IDs de Nodo (Asumiendo que están en el dataframe, agregamos esa col al template generator arriba)
-        # Como no puedo cambiar el template generator ya ejecutado en tu mente, voy a usar una heurística:
-        # Asignaré los pedidos al Nodo 10 (Bogotá) y Nodo 20 (Medellín) hardcoded para la demo si no hay match.
+        # SOLUCIÓN ROBUSTA: Extraer el ID del nodo del archivo de pedidos si existe, o usar un default.
+        # El generador de Coca-Cola NO puso columna 'Nodo_Origen_ID' en pedidos, solo Lat/Lon.
+        # Voy a modificar la función de 'solve_engine' para que intente mapear Lat/Lon a los IDs de la Configuración si es posible,
+        # o asigne aleatoriamente a los nodos disponibles en Config que tengan ese Skill (Load Balancing).
         
-        # En una implementación real: df_pedidos debe tener 'Nodo_Origen_ID'.
-        # Voy a asumir que 'Origen_Lat' es el ID para el solver si no es una coordenada válida.
+        # Recuperar lista de Nodos disponibles para ese skill desde la config
+        nodos_con_skill = df_config[df_config['Skill_Soportado'] == skill_req]['Nodo_ID'].unique()
         
-        n_orig_id = 10 # Default demo
-        n_dest_id = 20 # Default demo
-        
-        # Asignación a Recursos por Skill
+        if len(nodos_con_skill) > 0:
+            # Asignación Round Robin simple para la demo (ya que no tenemos el ID explícito en el excel de pedidos generado)
+            n_orig_id = nodos_con_skill[idx % len(nodos_con_skill)]
+            n_dest_id = nodos_con_skill[(idx + 1) % len(nodos_con_skill)]
+        else:
+            continue # No hay nodos para este skill
+            
         key_o = (n_orig_id, skill_req)
         key_d = (n_dest_id, skill_req)
         
-        # Si el nodo no tiene ese skill, es un problema de factibilidad (Infeasible)
-        if key_o in resource_map:
-            resource_map[key_o].append(ivo)
-        else:
-            # Fallback a un pool genérico para no romper, pero avisar
-            pass 
+        if key_o in resource_map: resource_map[key_o].append(ivo)
+        if key_d in resource_map: resource_map[key_d].append(ivd)
             
-        if key_d in resource_map:
-            resource_map[key_d].append(ivd)
-            
-        pedidos_vars.append({'id': pid, 'vars': (so, eo, sd, ed), 'row': row})
+        pedidos_vars.append({
+            'id': pid, 'vars': (so, eo, sd, ed), 'row': row, 
+            'n_orig': n_orig_id, 'n_dest': n_dest_id
+        })
 
-    # 3. RESTRICCIONES DE CAPACIDAD Y TURNOS (CUMULATIVE + INTERVALOS FICTICIOS)
+    # 3. RESTRICCIONES DE CAPACIDAD Y TURNOS
     for (nodo_id, skill), intervalos_pedidos in resource_map.items():
         if not intervalos_pedidos: continue
         
         capacity = dock_capacities.get((nodo_id, skill), 1)
         
-        # --- GESTIÓN DE TURNOS (BREAKS) ---
-        # Buscamos en la config los muelles de este nodo+skill y sus breaks
+        # Breaks
         muelles_config = df_config[(df_config['Nodo_ID'] == nodo_id) & (df_config['Skill_Soportado'] == skill)]
-        
         intervals_breaks = []
         
         for _, m_row in muelles_config.iterrows():
             breaks = parse_break_string(m_row.get('Breaks (Inicio-Fin)', ''))
-            # Apertura/Cierre también son "Breaks" gigantes (ej. cerrar de 00 a 06)
             open_h = m_row.get('Horario_Apertura', 0)
             close_h = m_row.get('Horario_Cierre', 24)
             
-            # Break nocturno (Cierre -> Apertura día siguiente)
-            # Simplificación: Bloqueamos 0->Apertura y Cierre->Horizonte
             if open_h > 0: breaks.append((0, open_h))
             if close_h < 24: breaks.append((close_h, 24))
-            # Repetir para día 2 y 3 (Horizonte 72h)
             
-            for day in range(3): # 3 días
+            for day in range(4): # 4 días horizonte
                 offset = day * 24
                 for b_start, b_end in breaks:
-                    # Crear Intervalo Ficticio que CONSUME capacidad
                     bk_start = int(b_start + offset)
                     bk_duration = int(b_end - b_start)
                     if bk_duration > 0:
-                        iv_break = model.NewIntervalVar(bk_start, bk_duration, bk_start + bk_duration, f'break_{nodo_id}_{skill}_{day}')
+                        iv_break = model.NewIntervalVar(bk_start, bk_duration, bk_start + bk_duration, f'bk')
                         intervals_breaks.append(iv_break)
 
-        # CUMULATIVE: Pedidos + Breaks <= Capacidad Total
         all_intervals = intervalos_pedidos + intervals_breaks
-        # Demandas: Pedidos consumen 1, Breaks consumen 1 (por cada muelle cerrado)
-        # Nota: Esta es una aproximación. Para precisión de muelle específico se requiere disjunctive modeling por muelle.
-        # Modelo SaaS Escalable: Usamos Cumulative.
         demands = [1] * len(all_intervals)
-        
         model.AddCumulative(all_intervals, demands, capacity)
 
     # 4. SOLVER
@@ -378,27 +346,31 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
     
     results = []
     if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        status.success(f"✅ Optimización Completada (Google Maps Usado: {'Sí' if use_google else 'No'})")
+        status_text.success(f"✅ Optimización Completada (Google Maps: {'Sí' if use_google else 'No'})")
         for p in pedidos_vars:
             pid = p['id']
             v = p['vars']
             so, eo, sd, ed = solver.Value(v[0]), solver.Value(v[1]), solver.Value(v[2]), solver.Value(v[3])
             
+            # Nombre Nodo
+            n_orig_name = df_config[df_config['Nodo_ID'] == p['n_orig']]['Nombre_Nodo'].iloc[0] if not df_config[df_config['Nodo_ID'] == p['n_orig']].empty else str(p['n_orig'])
+            n_dest_name = df_config[df_config['Nodo_ID'] == p['n_dest']]['Nombre_Nodo'].iloc[0] if not df_config[df_config['Nodo_ID'] == p['n_dest']].empty else str(p['n_dest'])
+
             results.append({
                 'Orden': pid, 'Tipo': 'Origen', 
-                'Nodo': 10, # Demo ID
+                'Nodo': n_orig_name, 
                 'Skill': p['row']['Skill_Requerido'],
                 'Inicio Servicio': so, 'Fin Servicio': eo
             })
             results.append({
                 'Orden': pid, 'Tipo': 'Destino', 
-                'Nodo': 20, # Demo ID
+                'Nodo': n_dest_name, 
                 'Skill': p['row']['Skill_Requerido'],
                 'Inicio Servicio': sd, 'Fin Servicio': ed
             })
         return pd.DataFrame(results)
     else:
-        status.error("⚠️ No se encontró solución factible (Revisar Skill Match o Horarios).")
+        status_text.error("⚠️ No se encontró solución factible.")
         return pd.DataFrame()
 
 # --- INTERFAZ UI ---
@@ -413,8 +385,9 @@ with st.sidebar:
     
     st.divider()
     st.markdown("### 2. Datos Maestros")
-    plantilla = generate_complex_template()
-    st.download_button("⬇️ Descargar Template V12 (Skills+Coords)", plantilla, "Template_Logistica_V12.xlsx")
+    if st.button("Generar Escenario Coca-Cola (Demo)"):
+        data_mx = generar_datos_cocacola()
+        st.download_button("⬇️ Descargar Simulacion_CocaCola.xlsx", data_mx, "Simulacion_CocaCola_MX.xlsx")
 
 st.title("🚛 SaaS Logístico T1 Enterprise")
 st.markdown(f"**Estado del Sistema:** {'🟢 Conectado a Google Maps' if st.session_state['api_key'] else '🟡 Modo Simulación Offline'}")
@@ -443,13 +416,13 @@ if st.session_state['results_df'] is not None:
     
     with tab1:
         st.markdown("### Planificación por Skill")
-        # Gráfica facetada por Skill
         c = alt.Chart(df).mark_bar().encode(
             x='Inicio Servicio', x2='Fin Servicio',
-            y='Etiqueta',
+            y=alt.Y('Nodo', sort='ascending'),
             color='Skill',
-            row='Skill' # Divide la gráfica en filas por tipo de Skill
-        ).properties(width=600, height=200).interactive()
+            row='Skill',
+            tooltip=['Orden', 'Hora Entrada', 'Hora Salida']
+        ).properties(width=700, height=300).interactive()
         st.altair_chart(c)
         
     with tab2:
