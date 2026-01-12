@@ -39,7 +39,43 @@ def smart_load(file):
         st.error(f"Error leyendo el Excel: {e}")
         return pd.DataFrame()
 
-# --- MOTOR DE OPTIMIZACIÓN CORREGIDO (SIN CHOQUES ORIGEN/DESTINO) ---
+def audit_schedule(df):
+    """
+    Revisa matemáticamente si hay solapamientos en algún muelle.
+    Retorna: (Status Booleano, DataFrame de Errores)
+    """
+    errors = []
+    # Agrupar por Nodo y Muelle para revisar carril por carril
+    grouped = df.groupby(['Nodo', 'Muelle'])
+    
+    for (nodo, muelle), group in grouped:
+        # Ordenar por hora de inicio
+        group = group.sort_values('Inicio Servicio')
+        last_end = -1
+        last_order = None
+        
+        for idx, row in group.iterrows():
+            start = row['Inicio Servicio']
+            end = row['Fin Servicio']
+            order = row['Orden']
+            
+            # Tolerancia de 0.001 para errores de punto flotante
+            if start < (last_end - 0.001):
+                errors.append({
+                    'Nodo': nodo,
+                    'Muelle': muelle,
+                    'Conflicto': f"Pedido {last_order} vs {order}",
+                    'Detalle': f"Fin A: {format_time(last_end)} > Inicio B: {format_time(start)}"
+                })
+            
+            last_end = end
+            last_order = order
+            
+    if len(errors) > 0:
+        return False, pd.DataFrame(errors)
+    return True, pd.DataFrame()
+
+# --- MOTOR DE OPTIMIZACIÓN (OR-TOOLS) ---
 def solve_logistics_engine(df_raw):
     status_text = st.empty()
     status_text.info("⚙️ Iniciando motor de optimización Google OR-Tools...")
@@ -62,7 +98,7 @@ def solve_logistics_engine(df_raw):
     horizon = 72 
     pedidos = []
     
-    # UNIFICACIÓN DE RECURSOS: Un muelle es un recurso único, sea para cargar o descargar.
+    # UNIFICACIÓN DE RECURSOS (Anti-Colisión)
     recursos_nodo = {} 
 
     for index, row in df_pedidos.iterrows():
@@ -86,7 +122,7 @@ def solve_logistics_engine(df_raw):
         
         model.Add(start_d >= end_o + t_viaje)
         
-        # METER CARGAS Y DESCARGAS EN LA MISMA BOLSA DEL NODO
+        # METER CARGAS Y DESCARGAS EN LA MISMA BOLSA
         if nodo_orig not in recursos_nodo: recursos_nodo[nodo_orig] = []
         recursos_nodo[nodo_orig].append(interval_o)
         
@@ -95,8 +131,6 @@ def solve_logistics_engine(df_raw):
         
         pedidos.append({'id': pid, 'vars': (start_o, end_o, start_d, end_d), 'data': row})
 
-    # Restricción Maestra: En un nodo, los intervalos NO pueden solaparse (asumiendo 1 canal por defecto para evitar colisión)
-    # Nota: Si el nodo tiene M muelles, el solver asignará secuencialmente para que quepan.
     for nodo, intervalos in recursos_nodo.items():
         model.AddNoOverlap(intervalos)
 
@@ -117,9 +151,6 @@ def solve_logistics_engine(df_raw):
             pid = p['id']
             so, eo, sd, ed = solver.Value(p['vars'][0]), solver.Value(p['vars'][1]), solver.Value(p['vars'][2]), solver.Value(p['vars'][3])
             
-            # Asignación simple de Muelle (Post-Proceso): 
-            # Como usamos NoOverlap en una sola lista, el solver garantiza secuencia. 
-            # Aquí asignamos 'Muelle 1' genérico. Para multi-muelle real se requiere Cumulative Constraint.
             results.append({'Orden': pid, 'Tipo': 'Origen', 'Nodo': p['data'].get('origen'), 'Muelle': 1, 'Inicio Servicio': so, 'Fin Servicio': eo, 'Batch': '1/1'})
             results.append({'Orden': pid, 'Tipo': 'Destino', 'Nodo': p['data'].get('destino'), 'Muelle': 1, 'Inicio Servicio': sd, 'Fin Servicio': ed, 'Batch': '1/1'})
         return pd.DataFrame(results)
@@ -152,6 +183,18 @@ if uploaded_file:
             results_df = st.session_state['results_df']
             
             st.divider()
+            
+            # --- SECCIÓN DE AUDITORÍA AUTOMÁTICA ---
+            is_valid, error_df = audit_schedule(results_df)
+            
+            if is_valid:
+                st.success("✅ AUDITORÍA APROBADA: El algoritmo verificó que NO existen solapamientos en ningún muelle.")
+            else:
+                st.error(f"❌ ALERTA DE COLISIÓN: Se detectaron {len(error_df)} conflictos de horario.")
+                st.dataframe(error_df)
+            
+            # ---------------------------------------
+
             st.subheader("🎯 Dashboard de Operaciones")
             
             kpi1, kpi2, kpi3 = st.columns(3)
@@ -161,29 +204,28 @@ if uploaded_file:
 
             tab1, tab2, tab3, tab4 = st.tabs(["🌍 Visión Global", "🔬 Inspector de Nodos", "📋 Tabla Datos", "📥 Exportar"])
 
-            # TAB 1: GANTT GENERAL (MEJORADO - ALTURA DINÁMICA)
             with tab1:
-                st.caption("Eje Y: Nodo | Eje X: Tiempo. Las barras semitransparentes permiten ver solapamientos.")
-                
-                # Cálculo de altura dinámica para que no se amontonen las etiquetas
+                st.caption("Eje Y: Nodo | Eje X: Tiempo. Altura dinámica automática.")
                 n_nodos = results_df['Nodo'].nunique()
-                chart_height = max(400, n_nodos * 30) # Mínimo 400px, o 30px por nodo
+                chart_height = max(400, n_nodos * 30)
                 
                 chart_global = alt.Chart(results_df).mark_bar(opacity=0.7).encode(
                     x=alt.X('Inicio Servicio', title='Hora Operativa'),
                     x2='Fin Servicio',
-                    y=alt.Y('Etiqueta Nodo', sort='ascending', title='Ubicación (Nodo)'),
+                    y=alt.Y('Etiqueta Nodo', sort='ascending', title='Ubicación'),
                     color=alt.Color('Tipo', scale=alt.Scale(domain=['Origen', 'Destino'], range=['#3b8ed0', '#e0553d'])),
                     tooltip=['Orden', 'Hora Entrada', 'Hora Salida', 'Etiqueta Nodo']
                 ).properties(height=chart_height).interactive()
-                
                 st.altair_chart(chart_global, use_container_width=True)
 
-            # TAB 2: INSPECTOR (CORREGIDO ORDENAMIENTO)
             with tab2:
-                st.markdown("### 🔎 Auditoría de Nodos y Muelles")
-                col_filt, col_info = st.columns([1, 3])
+                # INTEGRACIÓN DEL STATUS EN LA PESTAÑA INSPECTOR TAMBIÉN
+                st.markdown("### 🔎 Auditoría de Nodos")
                 
+                if not is_valid:
+                    st.warning("⚠️ Atención: Revisa los nodos con conflictos listados arriba.")
+
+                col_filt, col_info = st.columns([1, 3])
                 with col_filt:
                     lista_nodos = sorted(results_df['Nodo'].unique())
                     nodo_sel = st.selectbox("Seleccionar Nodo a Auditar:", lista_nodos)
@@ -199,16 +241,14 @@ if uploaded_file:
                 st.markdown("#### Cronograma Detallado del Nodo")
                 
                 chart_nodo = alt.Chart(df_nodo).mark_bar().encode(
-                    x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
+                    x=alt.X('Inicio Servicio', title='Horas'),
                     x2='Fin Servicio',
-                    y=alt.Y('Etiqueta Muelle', title='Carril / Muelle'),
-                    color=alt.Color('Tipo', legend=alt.Legend(title="Operación")),
+                    y=alt.Y('Etiqueta Muelle', title='Carril'),
+                    color='Tipo',
                     tooltip=['Orden', 'Hora Entrada', 'Hora Salida', 'Tipo']
                 ).properties(height=300)
-                
                 st.altair_chart(chart_nodo, use_container_width=True)
                 
-                # Tabla Corregida (Sort antes de Filter)
                 st.dataframe(df_nodo.sort_values('Inicio Servicio')[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']], use_container_width=True)
 
             with tab3:
