@@ -64,8 +64,10 @@ def solve_logistics_engine(df_raw):
     model = cp_model.CpModel()
     horizon = 72 
     pedidos = []
-    muelles_origen = {} 
-    muelles_destino = {} 
+    
+    # DICCIONARIO MAESTRO DE RECURSOS (NODOS)
+    # Clave: NodoID -> Valor: Lista de todos los intervalos (Cargas Y Descargas mezcladas)
+    recursos_nodo = {} 
 
     for index, row in df_pedidos.iterrows():
         try:
@@ -78,6 +80,7 @@ def solve_logistics_engine(df_raw):
             if pd.isna(nodo_orig) or pd.isna(nodo_dest): continue
         except: continue
 
+        # Variables
         start_o = model.NewIntVar(0, horizon, f'start_o_{pid}')
         end_o = model.NewIntVar(0, horizon, f'end_o_{pid}')
         interval_o = model.NewIntervalVar(start_o, t_carga, end_o, f'interval_o_{pid}')
@@ -86,18 +89,24 @@ def solve_logistics_engine(df_raw):
         end_d = model.NewIntVar(0, horizon, f'end_d_{pid}')
         interval_d = model.NewIntervalVar(start_d, t_descarga, end_d, f'interval_d_{pid}')
         
+        # Conexión Lógica (Viaje)
         model.Add(start_d >= end_o + t_viaje)
         
-        if nodo_orig not in muelles_origen: muelles_origen[nodo_orig] = []
-        muelles_origen[nodo_orig].append(interval_o)
+        # --- CORRECCIÓN CRÍTICA: UNIFICAR RECURSOS ---
+        # Agregamos la carga al nodo origen
+        if nodo_orig not in recursos_nodo: recursos_nodo[nodo_orig] = []
+        recursos_nodo[nodo_orig].append(interval_o)
         
-        if nodo_dest not in muelles_destino: muelles_destino[nodo_dest] = []
-        muelles_destino[nodo_dest].append(interval_d)
+        # Agregamos la descarga al nodo destino
+        if nodo_dest not in recursos_nodo: recursos_nodo[nodo_dest] = []
+        recursos_nodo[nodo_dest].append(interval_d)
         
         pedidos.append({'id': pid, 'vars': (start_o, end_o, start_d, end_d), 'data': row})
 
-    for nodo, intervalos in muelles_origen.items(): model.AddNoOverlap(intervalos)
-    for nodo, intervalos in muelles_destino.items(): model.AddNoOverlap(intervalos)
+    # APLICAR NO-OVERLAP A LA LISTA UNIFICADA
+    # Ahora el solver ve Cargas y Descargas como bloques sólidos en el mismo carril
+    for nodo, intervalos in recursos_nodo.items():
+        model.AddNoOverlap(intervalos)
 
     if pedidos:
         obj_var = model.NewIntVar(0, horizon, 'makespan')
@@ -120,7 +129,7 @@ def solve_logistics_engine(df_raw):
             results.append({'Orden': pid, 'Tipo': 'Destino', 'Nodo': p['data'].get('destino'), 'Muelle': 1, 'Inicio Servicio': sd, 'Fin Servicio': ed, 'Batch': '1/1'})
         return pd.DataFrame(results)
     else:
-        status_text.error("⚠️ No se encontró solución factible.")
+        status_text.error("⚠️ Saturación Total: No hay huecos suficientes en los muelles para atender todo sin solapamiento. Intenta aumentar el horizonte.")
         return pd.DataFrame()
 
 # --- INTERFAZ DE USUARIO ---
@@ -135,7 +144,6 @@ if uploaded_file:
     if not df_input.empty:
         st.write(f"📊 Datos cargados: {len(df_input)} filas.")
         
-        # BOTÓN DE ACCIÓN
         if st.button("🚀 Ejecutar Optimización"):
             results_df = solve_logistics_engine(df_input)
             if not results_df.empty:
@@ -145,26 +153,21 @@ if uploaded_file:
                 results_df['Etiqueta Nodo'] = "Nodo " + results_df['Nodo'].astype(str)
                 results_df['Etiqueta Muelle'] = "Muelle " + results_df['Muelle'].astype(str)
                 
-                # GUARDAR EN MEMORIA DE SESIÓN
                 st.session_state['results_df'] = results_df
         
-        # --- RENDERIZADO DEL DASHBOARD (SI HAY DATOS EN MEMORIA) ---
         if st.session_state['results_df'] is not None:
             results_df = st.session_state['results_df']
             
             st.divider()
             st.subheader("🎯 Dashboard de Operaciones")
             
-            # KPIs Globales
             kpi1, kpi2, kpi3 = st.columns(3)
             kpi1.metric("Total Pedidos", results_df['Orden'].nunique())
             kpi2.metric("Nodos Activos", results_df['Nodo'].nunique())
             kpi3.metric("Última Entrega", results_df['Hora Salida'].max())
 
-            # PESTAÑAS
             tab1, tab2, tab3, tab4 = st.tabs(["🌍 Visión Global", "🔬 Inspector de Nodos", "📋 Tabla Datos", "📥 Exportar"])
 
-            # TAB 1: GANTT GENERAL
             with tab1:
                 st.caption("Panorama general de toda la red logística.")
                 chart_global = alt.Chart(results_df).mark_bar().encode(
@@ -176,17 +179,14 @@ if uploaded_file:
                 ).properties(height=500).interactive()
                 st.altair_chart(chart_global, use_container_width=True)
 
-            # TAB 2: INSPECTOR (CON FILTRO ESTABLE)
             with tab2:
                 st.markdown("### 🔎 Auditoría de Nodos y Muelles")
                 col_filt, col_info = st.columns([1, 3])
                 
                 with col_filt:
-                    # Selector de Nodo
                     lista_nodos = sorted(results_df['Nodo'].unique())
                     nodo_sel = st.selectbox("Seleccionar Nodo a Auditar:", lista_nodos)
                 
-                # Filtrar Data
                 df_nodo = results_df[results_df['Nodo'] == nodo_sel].copy()
                 
                 with col_info:
@@ -197,13 +197,11 @@ if uploaded_file:
 
                 st.markdown("#### Cronograma Detallado del Nodo")
                 
-                # Gráfica Específica
                 chart_nodo = alt.Chart(df_nodo).mark_bar().encode(
                     x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
                     x2='Fin Servicio',
                     y=alt.Y('Etiqueta Muelle', title='Carril / Muelle'),
                     color=alt.Color('Tipo', legend=alt.Legend(title="Operación")),
-                    # order=alt.Order('Inicio Servicio', sort='ascending'), 
                     tooltip=[
                         alt.Tooltip('Orden', title='Pedido #'),
                         alt.Tooltip('Hora Entrada'),
@@ -214,14 +212,11 @@ if uploaded_file:
                 
                 st.altair_chart(chart_nodo, use_container_width=True)
                 
-                # Tabla pequeña (con la corrección de ordenamiento previa)
                 st.dataframe(df_nodo.sort_values('Inicio Servicio')[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']], use_container_width=True)
 
-            # TAB 3: TABLA GENERAL
             with tab3:
                 st.dataframe(results_df, use_container_width=True)
 
-            # TAB 4: DESCARGAS
             with tab4:
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
