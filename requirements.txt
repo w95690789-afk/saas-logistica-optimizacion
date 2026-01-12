@@ -3,4 +3,4 @@ pandas
 ortools
 openpyxl
 xlsxwriter
-matplotlib
+altair
