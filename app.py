@@ -8,6 +8,10 @@ from datetime import datetime, timedelta
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="SaaS Logístico T1", layout="wide", page_icon="🚛")
 
+# --- GESTIÓN DE ESTADO (MEMORIA) ---
+if 'results_df' not in st.session_state:
+    st.session_state['results_df'] = None
+
 # --- FUNCIONES DE UTILIDAD ---
 
 def format_time(hours_float):
@@ -131,91 +135,97 @@ if uploaded_file:
     if not df_input.empty:
         st.write(f"📊 Datos cargados: {len(df_input)} filas.")
         
+        # BOTÓN DE ACCIÓN
         if st.button("🚀 Ejecutar Optimización"):
             results_df = solve_logistics_engine(df_input)
-            
             if not results_df.empty:
                 # Pre-procesamiento
                 results_df['Hora Entrada'] = results_df['Inicio Servicio'].apply(format_time)
                 results_df['Hora Salida'] = results_df['Fin Servicio'].apply(format_time)
                 results_df['Etiqueta Nodo'] = "Nodo " + results_df['Nodo'].astype(str)
-                results_df['Etiqueta Muelle'] = "Muelle " + results_df['Muelle'].astype(str) # Agregado para filtro
-
-                st.divider()
-                st.subheader("🎯 Dashboard de Operaciones")
+                results_df['Etiqueta Muelle'] = "Muelle " + results_df['Muelle'].astype(str)
                 
-                # KPIs Globales
-                kpi1, kpi2, kpi3 = st.columns(3)
-                kpi1.metric("Total Pedidos", results_df['Orden'].nunique())
-                kpi2.metric("Nodos Activos", results_df['Nodo'].nunique())
-                kpi3.metric("Última Entrega", results_df['Hora Salida'].max())
+                # GUARDAR EN MEMORIA DE SESIÓN
+                st.session_state['results_df'] = results_df
+        
+        # --- RENDERIZADO DEL DASHBOARD (SI HAY DATOS EN MEMORIA) ---
+        if st.session_state['results_df'] is not None:
+            results_df = st.session_state['results_df']
+            
+            st.divider()
+            st.subheader("🎯 Dashboard de Operaciones")
+            
+            # KPIs Globales
+            kpi1, kpi2, kpi3 = st.columns(3)
+            kpi1.metric("Total Pedidos", results_df['Orden'].nunique())
+            kpi2.metric("Nodos Activos", results_df['Nodo'].nunique())
+            kpi3.metric("Última Entrega", results_df['Hora Salida'].max())
 
-                # PESTAÑAS
-                tab1, tab2, tab3, tab4 = st.tabs(["🌍 Visión Global", "🔬 Inspector de Nodos", "📋 Tabla Datos", "📥 Exportar"])
+            # PESTAÑAS
+            tab1, tab2, tab3, tab4 = st.tabs(["🌍 Visión Global", "🔬 Inspector de Nodos", "📋 Tabla Datos", "📥 Exportar"])
 
-                # TAB 1: GANTT GENERAL
-                with tab1:
-                    st.caption("Panorama general de toda la red logística.")
-                    chart_global = alt.Chart(results_df).mark_bar().encode(
-                        x=alt.X('Inicio Servicio', title='Hora Operativa'),
-                        x2='Fin Servicio',
-                        y=alt.Y('Etiqueta Nodo', sort='ascending'),
-                        color='Tipo',
-                        tooltip=['Orden', 'Hora Entrada', 'Hora Salida']
-                    ).properties(height=500).interactive()
-                    st.altair_chart(chart_global, use_container_width=True)
+            # TAB 1: GANTT GENERAL
+            with tab1:
+                st.caption("Panorama general de toda la red logística.")
+                chart_global = alt.Chart(results_df).mark_bar().encode(
+                    x=alt.X('Inicio Servicio', title='Hora Operativa'),
+                    x2='Fin Servicio',
+                    y=alt.Y('Etiqueta Nodo', sort='ascending'),
+                    color='Tipo',
+                    tooltip=['Orden', 'Hora Entrada', 'Hora Salida']
+                ).properties(height=500).interactive()
+                st.altair_chart(chart_global, use_container_width=True)
 
-                # TAB 2: INSPECTOR (NUEVO)
-                with tab2:
-                    st.markdown("### 🔎 Auditoría de Nodos y Muelles")
-                    col_filt, col_info = st.columns([1, 3])
-                    
-                    with col_filt:
-                        # Selector de Nodo
-                        lista_nodos = sorted(results_df['Nodo'].unique())
-                        nodo_sel = st.selectbox("Seleccionar Nodo a Auditar:", lista_nodos)
-                    
-                    # Filtrar Data
-                    df_nodo = results_df[results_df['Nodo'] == nodo_sel].copy()
-                    
-                    with col_info:
-                        kpi_n1, kpi_n2 = st.columns(2)
-                        kpi_n1.metric(f"Operaciones en Nodo {nodo_sel}", len(df_nodo))
-                        ocupacion_h = (df_nodo['Fin Servicio'] - df_nodo['Inicio Servicio']).sum()
-                        kpi_n2.metric("Horas Totales Ocupadas", f"{ocupacion_h:.1f} hrs")
+            # TAB 2: INSPECTOR (CON FILTRO ESTABLE)
+            with tab2:
+                st.markdown("### 🔎 Auditoría de Nodos y Muelles")
+                col_filt, col_info = st.columns([1, 3])
+                
+                with col_filt:
+                    # Selector de Nodo
+                    lista_nodos = sorted(results_df['Nodo'].unique())
+                    nodo_sel = st.selectbox("Seleccionar Nodo a Auditar:", lista_nodos)
+                
+                # Filtrar Data
+                df_nodo = results_df[results_df['Nodo'] == nodo_sel].copy()
+                
+                with col_info:
+                    kpi_n1, kpi_n2 = st.columns(2)
+                    kpi_n1.metric(f"Operaciones en Nodo {nodo_sel}", len(df_nodo))
+                    ocupacion_h = (df_nodo['Fin Servicio'] - df_nodo['Inicio Servicio']).sum()
+                    kpi_n2.metric("Horas Totales Ocupadas", f"{ocupacion_h:.1f} hrs")
 
-                    st.markdown("#### Cronograma Detallado del Nodo")
-                    st.caption("Si ves barras superpuestas en la misma línea horizontal, hay un error. Si no, el algoritmo es perfecto.")
-                    
-                    # Gráfica Específica por Nodo (Eje Y = Muelle)
-                    chart_nodo = alt.Chart(df_nodo).mark_bar().encode(
-                        x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
-                        x2='Fin Servicio',
-                        y=alt.Y('Etiqueta Muelle', title='Carril / Muelle'),
-                        color=alt.Color('Tipo', legend=alt.Legend(title="Operación")),
-                        order=alt.Order('Inicio Servicio', sort='ascending'), # Ordenar visualmente
-                        tooltip=[
-                            alt.Tooltip('Orden', title='Pedido #'),
-                            alt.Tooltip('Hora Entrada'),
-                            alt.Tooltip('Hora Salida'),
-                            alt.Tooltip('Tipo')
-                        ]
-                    ).properties(height=300)
-                    
-                    st.altair_chart(chart_nodo, use_container_width=True)
-                    
-                    # Tabla pequeña de ese nodo
-                    st.dataframe(df_nodo.sort_values('Inicio Servicio')[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']], use_container_width=True)
+                st.markdown("#### Cronograma Detallado del Nodo")
+                
+                # Gráfica Específica
+                chart_nodo = alt.Chart(df_nodo).mark_bar().encode(
+                    x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
+                    x2='Fin Servicio',
+                    y=alt.Y('Etiqueta Muelle', title='Carril / Muelle'),
+                    color=alt.Color('Tipo', legend=alt.Legend(title="Operación")),
+                    # order=alt.Order('Inicio Servicio', sort='ascending'), 
+                    tooltip=[
+                        alt.Tooltip('Orden', title='Pedido #'),
+                        alt.Tooltip('Hora Entrada'),
+                        alt.Tooltip('Hora Salida'),
+                        alt.Tooltip('Tipo')
+                    ]
+                ).properties(height=300)
+                
+                st.altair_chart(chart_nodo, use_container_width=True)
+                
+                # Tabla pequeña (con la corrección de ordenamiento previa)
+                st.dataframe(df_nodo.sort_values('Inicio Servicio')[['Orden', 'Tipo', 'Hora Entrada', 'Hora Salida', 'Etiqueta Muelle']], use_container_width=True)
 
-                # TAB 3: TABLA GENERAL
-                with tab3:
-                    st.dataframe(results_df, use_container_width=True)
+            # TAB 3: TABLA GENERAL
+            with tab3:
+                st.dataframe(results_df, use_container_width=True)
 
-                # TAB 4: DESCARGAS
-                with tab4:
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                        results_df.to_excel(writer, index=False)
-                    st.download_button("Descargar Excel Maestro", output.getvalue(), "Plan_Logistico_Full.xlsx")
+            # TAB 4: DESCARGAS
+            with tab4:
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    results_df.to_excel(writer, index=False)
+                st.download_button("Descargar Excel Maestro", output.getvalue(), "Plan_Logistico_Full.xlsx")
     else:
         st.error("Error leyendo el archivo.")
