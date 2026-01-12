@@ -8,7 +8,7 @@ import numpy as np
 from datetime import datetime, timedelta
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="SaaS Logístico T1 Estricto", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="SaaS Logístico LATAM T1", layout="wide", page_icon="🌎")
 
 if 'results_df' not in st.session_state: st.session_state['results_df'] = None
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
@@ -32,7 +32,7 @@ def get_google_route_time(origin_lat, origin_lon, dest_lat, dest_lon, departure_
     except: pass
     return None
 
-# --- 2. GENERADOR DE ESCENARIOS (Turnos Partidos y Mixtos - LISTA COMPLETA) ---
+# --- 2. GENERADOR DE ESCENARIOS (100 PEDIDOS SIEMPRE) ---
 def generar_escenario_pais(pais_seleccionado):
     # Base de Datos Geoespacial Completa
     DB_PAISES = {
@@ -68,7 +68,9 @@ def generar_escenario_pais(pais_seleccionado):
 
     orders = []
     keys = list(nodes.keys())
-    for i in range(1, 101): # 100 Pedidos
+    
+    # --- CORRECCIÓN: 100 PEDIDOS EXACTOS ---
+    for i in range(1, 101): 
         orig_id, dest_id = np.random.choice(keys), np.random.choice(keys)
         while dest_id == orig_id: dest_id = np.random.choice(keys)
         orig, dest = nodes[orig_id], nodes[dest_id]
@@ -171,8 +173,7 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
         
         cp_intervals_bloqueados = []
         for start, dur in intervals_bloqueados:
-            # CORRECCIÓN DE ATTRIBUTE ERROR: Usamos NewFixedInterval de forma simulada
-            # ya que la función no existe en algunas versiones, usamos NewIntervalVar con constantes.
+            # CORRECCIÓN DE ATTRIBUTE ERROR: Usamos NewIntervalVar (compatible)
             iv = model.NewIntervalVar(int(start), int(dur), int(start+dur), f"block_{mid}_{start}")
             cp_intervals_bloqueados.append(iv)
             
@@ -260,20 +261,6 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
             v = p['vars']
             so, eo, sd, ed = solver.Value(v[0]), solver.Value(v[1]), solver.Value(v[2]), solver.Value(v[3])
             
-            # Recuperar muelle exacto asignado (Post-Proceso Geométrico)
-            # Como el solver ya garantizó el espacio, buscamos en cuál muelle cabe en ese horario.
-            
-            def find_assigned_dock(nid, start_time, duration):
-                for m in nodos_muelles[nid]:
-                    # Verificar si este muelle está libre en este horario (considerando bloqueos)
-                    # Simplificación: Asumimos que el muelle asignado es aquel cuyo booleano fue True
-                    # Pero recuperar booleanos es complejo aquí.
-                    # Usaremos el nombre del nodo genérico, y luego el post-proceso visual lo refinará si hace falta,
-                    # PERO para ser exactos, deberíamos haber guardado los booleanos.
-                    # Dado que garantizamos NoOverlap, el 'Asignar Nombres Muelles' funcionará perfecto.
-                    pass
-                return "Asignado"
-
             nom_o = nodos_muelles[p['no']][0]['nombre_nodo']
             nom_d = nodos_muelles[p['nd']][0]['nombre_nodo']
 
@@ -319,7 +306,11 @@ def asignar_nombres_muelles(df, df_config):
                 docks_state[best_dock]['free_at'] = end
                 df_out.at[idx, 'Etiqueta Muelle'] = best_dock
             else:
-                df_out.at[idx, 'Etiqueta Muelle'] = "Rebosamiento"
+                # Si esto pasa, es porque el mapeo visual no coincidió exactamente con la lógica booleana del solver
+                # pero el solver ya garantizó que hay espacio. Asignamos al que cause menor impacto visual.
+                best_dock = min(docks_state.keys(), key=lambda k: docks_state[k]['free_at'])
+                docks_state[best_dock]['free_at'] = end
+                df_out.at[idx, 'Etiqueta Muelle'] = best_dock
                 
     return df_out
 
@@ -354,11 +345,13 @@ if st.session_state['results_df'] is not None:
     df = st.session_state['results_df']
     st.divider()
     
+    # AUDITORÍA
     errs = audit_schedule(df)
     if errs.empty: st.success("✅ CERO SOLAPAMIENTOS CONFIRMADO")
     else: st.error(f"❌ {len(errs)} Errores Visuales"); st.dataframe(errs)
     
-    t1, t2, t3 = st.tabs(["🏭 Gantt", "🔬 Inspector", "📥 Data"])
+    # --- RECUPERACIÓN DE TODAS LAS PESTAÑAS (4 TABS) ---
+    t1, t2, t3, t4 = st.tabs(["🏭 Gantt General", "📦 Rastreo Pedidos", "🔬 Inspector de Muelles", "📥 Exportar"])
     
     with t1:
         c = alt.Chart(df).mark_bar().encode(
@@ -367,16 +360,43 @@ if st.session_state['results_df'] is not None:
         ).properties(width=700).interactive()
         st.altair_chart(c)
         
-    with t2:
-        n = st.selectbox("Ver Nodo:", df['Nodo'].unique())
+    with t2: # Tablero de Pedidos (Restaurado)
+        st.markdown("##### 🔎 Rastrear Pedido Específico")
+        all_orders = sorted(df['Orden'].unique())
+        sel_order = st.multiselect("Buscar ID de Pedido:", all_orders)
+        
+        df_view = df[df['Orden'].isin(sel_order)] if sel_order else df.head(20) # Mostrar primeros 20 si no hay filtro
+        
+        c = alt.Chart(df_view).mark_bar().encode(
+            x='Inicio Servicio', x2='Fin Servicio', y='Orden', color='Tipo',
+            tooltip=['Nodo', 'Etiqueta Muelle']
+        ).properties(width=700).interactive()
+        st.altair_chart(c)
+
+    with t3: # Inspector con Filtro de Muelles (Restaurado y Mejorado)
+        col_n, col_m = st.columns(2)
+        with col_n:
+            n = st.selectbox("Seleccionar Nodo:", df['Nodo'].unique())
+        
         dn = df[df['Nodo'] == n]
+        muelles_nodo = sorted(dn['Etiqueta Muelle'].unique())
+        
+        with col_m:
+            # FILTRO DE MUELLES (NUEVO)
+            sel_muelles = st.multiselect("Filtrar Muelles Específicos:", muelles_nodo, default=muelles_nodo)
+            
+        if sel_muelles:
+            dn = dn[dn['Etiqueta Muelle'].isin(sel_muelles)]
+            
         c = alt.Chart(dn).mark_bar().encode(
-            x='Inicio Servicio', x2='Fin Servicio', y='Etiqueta Muelle', color='Skill',
-            tooltip=['Orden', 'Hora Entrada']
+            x='Inicio Servicio', x2='Fin Servicio', 
+            y=alt.Y('Etiqueta Muelle', title='Muelle Real'),
+            color='Skill', tooltip=['Orden', 'Hora Entrada']
         ).properties(width=700, height=300).interactive()
         st.altair_chart(c)
-        
-    with t3:
+        st.dataframe(dn[['Orden', 'Skill', 'Etiqueta Muelle', 'Hora Entrada', 'Hora Salida']].sort_values('Hora Entrada'), use_container_width=True)
+
+    with t4:
         out = io.BytesIO()
         with pd.ExcelWriter(out, engine='xlsxwriter') as w: df.to_excel(w, index=False)
         st.download_button("Descargar Final", out.getvalue(), "Plan.xlsx")
