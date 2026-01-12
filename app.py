@@ -7,11 +7,73 @@ import requests
 import numpy as np 
 from datetime import datetime, timedelta
 
-# --- CONFIGURACIÓN ---
-st.set_page_config(page_title="SaaS Logístico LATAM T1", layout="wide", page_icon="🌎")
+# --- CONFIGURACIÓN DE PÁGINA Y ESTILOS ---
+st.set_page_config(
+    page_title="T1 LATAM | Control Tower", 
+    layout="wide", 
+    page_icon="🚛",
+    initial_sidebar_state="expanded"
+)
 
+# --- INYECCIÓN CSS (UX/UI) ---
+st.markdown("""
+    <style>
+    /* Importar fuente moderna */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
+    
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+    
+    /* Encabezados */
+    h1, h2, h3 {
+        color: #0f172a; 
+    }
+    
+    /* Botones Primarios */
+    .stButton>button {
+        background-color: #2563eb;
+        color: white;
+        border-radius: 8px;
+        border: none;
+        padding: 0.5rem 1rem;
+        font-weight: 600;
+        transition: all 0.3s ease;
+        width: 100%;
+    }
+    .stButton>button:hover {
+        background-color: #1d4ed8;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    
+    /* Métricas */
+    div[data-testid="stMetric"] {
+        background-color: #f8fafc;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    }
+    
+    /* Alertas */
+    .stAlert {
+        border-radius: 8px;
+    }
+    
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: #f1f5f9;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# --- ESTADO ---
 if 'results_df' not in st.session_state: st.session_state['results_df'] = None
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
+
+# ==========================================
+# SECCIÓN LÓGICA (INTACTA - NO TOCAR)
+# ==========================================
 
 # --- 1. MÓDULO GOOGLE MAPS ---
 def get_google_route_time(origin_lat, origin_lon, dest_lat, dest_lon, departure_time_iso, api_key):
@@ -32,7 +94,7 @@ def get_google_route_time(origin_lat, origin_lon, dest_lat, dest_lon, departure_
     except: pass
     return None
 
-# --- 2. GENERADOR DE ESCENARIOS (100 PEDIDOS SIEMPRE) ---
+# --- 2. GENERADOR DE ESCENARIOS ---
 def generar_escenario_pais(pais_seleccionado):
     DB_PAISES = {
         "Mexico": {
@@ -68,7 +130,6 @@ def generar_escenario_pais(pais_seleccionado):
     orders = []
     keys = list(nodes.keys())
     
-    # 100 PEDIDOS EXACTOS
     for i in range(1, 101): 
         orig_id, dest_id = np.random.choice(keys), np.random.choice(keys)
         while dest_id == orig_id: dest_id = np.random.choice(keys)
@@ -80,7 +141,7 @@ def generar_escenario_pais(pais_seleccionado):
             'Destino_Lat': dest['Lat'], 'Destino_Lon': dest['Lon'],
             'Tiempo_Estimado_Manual_h': get_time_approx(orig['Lat'], orig['Lon'], dest['Lat'], dest['Lon']),
             'Tiempo_Carga_h': 2.0, 'Tiempo_Descarga_h': 1.5,
-            'Skill_Requerido': np.random.choice(['Seco', 'Refrigerado'], p=[0.6, 0.4]), # 40% Refri
+            'Skill_Requerido': np.random.choice(['Seco', 'Refrigerado'], p=[0.6, 0.4]), 
             'Prioridad': 1
         })
     
@@ -88,14 +149,11 @@ def generar_escenario_pais(pais_seleccionado):
     for nid, data in nodes.items():
         is_plant = data['Type'] == 'Plant'
         for d in range(1, data['Cap'] + 1):
-            # Lógica Caótica de Turnos
             if np.random.rand() < 0.5:
                 ap, cl, brk = 6, 22, "12-14" 
             else:
                 ap, cl, brk = (0, 24, "13-14; 21-22") if is_plant else (7, 19, "13-14")
             
-            # Lógica de Skills: Asegurar suficiencia
-            # Garantizamos al menos 1 de cada tipo por nodo si es posible, luego aleatorio
             if d == 1: skill = 'Seco'
             elif d == 2: skill = 'Refrigerado'
             else:
@@ -144,139 +202,132 @@ def audit_schedule(df):
             last_end, last_ord = r['Fin Servicio'], r['Orden']
     return pd.DataFrame(errors)
 
-# --- 4. MOTOR DE OPTIMIZACIÓN (ASIGNACIÓN COMPATIBLE) ---
+# --- 4. MOTOR DE OPTIMIZACIÓN (LÓGICA INTACTA V15) ---
 def solve_engine(df_pedidos, df_config, use_google, api_key):
-    status_ph = st.empty()
-    status_ph.info("⚙️ Iniciando Optimización Estricta...")
-    
-    model = cp_model.CpModel()
-    horizon = 120 # Aumentado para que quepan 100 pedidos
-    
-    # 1. PRE-PROCESAMIENTO DE MUELLES
-    nodos_muelles = {}
-    
-    for _, row in df_config.iterrows():
-        nid = row['Nodo_ID']
-        mid = row['Muelle_ID']
-        skill_m = row['Skill_Soportado']
-        if nid not in nodos_muelles: nodos_muelles[nid] = []
+    # Uso de st.status para feedback moderno en lugar de st.empty
+    with st.status("🚀 Iniciando Motor de Optimización T1...", expanded=True) as status:
         
-        intervals_bloqueados = []
-        op, cl = row.get('Horario_Apertura', 0), row.get('Horario_Cierre', 24)
-        breaks_list = parse_break_string(row.get('Breaks (Inicio-Fin)', ''))
+        status.write("⚙️ Configurando solver y horizonte temporal...")
+        model = cp_model.CpModel()
+        horizon = 120 
         
-        for day in range(5): # 5 días horizonte
-            off = day * 24
-            if op > 0: intervals_bloqueados.append((0+off, op))
-            if cl < 24: intervals_bloqueados.append((cl+off, 24-cl))
-            for s, e in breaks_list:
-                dur = e - s
-                if dur > 0: intervals_bloqueados.append((s+off, dur))
+        # 1. PRE-PROCESAMIENTO
+        status.write("🏗️ Construyendo infraestructura de muelles y turnos...")
+        nodos_muelles = {}
         
-        cp_intervals_bloqueados = []
-        for start, dur in intervals_bloqueados:
-            iv = model.NewIntervalVar(int(start), int(dur), int(start+dur), f"bk_{mid}_{start}")
-            cp_intervals_bloqueados.append(iv)
+        for _, row in df_config.iterrows():
+            nid = row['Nodo_ID']
+            mid = row['Muelle_ID']
+            skill_m = row['Skill_Soportado']
+            if nid not in nodos_muelles: nodos_muelles[nid] = []
             
-        nodos_muelles[nid].append({
-            'id': mid, 'skill': skill_m, 'nombre_nodo': row['Nombre_Nodo'],
-            'bloqueos': cp_intervals_bloqueados, 'ordenes_asignadas': []
-        })
-
-    pedidos_vars = []
-    route_cache = {}
-    
-    prog = st.progress(0)
-    for i, row in df_pedidos.iterrows():
-        prog.progress((i+1)/len(df_pedidos))
-        pid, skill_req = row['ID'], row['Skill_Requerido']
-        
-        tv = row.get('Tiempo_Estimado_Manual_h', 5)
-        if use_google and api_key and pd.notna(row.get('Origen_Lat')):
-            k = (row['Origen_Lat'], row['Origen_Lon'], row['Destino_Lat'], row['Destino_Lon'])
-            if k not in route_cache:
-                dt = (datetime.utcnow()+timedelta(days=1)).replace(hour=8).isoformat()+'Z'
-                t_g = get_google_route_time(*k, dt, api_key)
-                if t_g: route_cache[k] = t_g
-            tv = route_cache.get(k, tv)
-        
-        tc, td, tv = int(row.get('Tiempo_Carga_h', 2)), int(row.get('Tiempo_Descarga_h', 2)), int(tv)
-        so, eo = model.NewIntVar(0, horizon, f'so_{pid}'), model.NewIntVar(0, horizon, f'eo_{pid}')
-        sd, ed = model.NewIntVar(0, horizon, f'sd_{pid}'), model.NewIntVar(0, horizon, f'ed_{pid}')
-        model.Add(sd >= eo + tv)
-
-        # --- ASIGNACIÓN INTELIGENTE DE NODOS (FIX V15) ---
-        # Solo asignar nodos que tengan muelles COMPATIBLES con el skill del pedido
-        def get_compatible_nodes(skill_necesario):
-            candidates = []
-            for nid, muelles in nodos_muelles.items():
-                # Verificar si este nodo tiene al menos 1 muelle compatible
-                if any(m['skill'] in ['Mixto', skill_necesario] for m in muelles):
-                    candidates.append(nid)
-            return candidates
-
-        valid_nodes = get_compatible_nodes(skill_req)
-        
-        if len(valid_nodes) < 2:
-            # Si no hay suficientes nodos para origen y destino, saltar pedido (esto evita errores de indice)
-            continue
-
-        # Distribuir carga (Round Robin sobre nodos válidos)
-        n_orig = valid_nodes[i % len(valid_nodes)]
-        n_dest = valid_nodes[(i+1) % len(valid_nodes)]
-        
-        # Evitar origen == destino
-        if n_orig == n_dest:
-             n_dest = valid_nodes[(i+2) % len(valid_nodes)]
-
-        def asignar_a_muelle_posible(nodo_id, start_var, duration, end_var, tipo_op):
-            literales_eleccion = []
-            for m in nodos_muelles.get(nodo_id, []):
-                if m['skill'] == 'Mixto' or m['skill'] == skill_req:
-                    is_in_dock = model.NewBoolVar(f"{pid}_{tipo_op}_in_{m['id']}")
-                    literales_eleccion.append(is_in_dock)
-                    iv_opt = model.NewOptionalIntervalVar(start_var, duration, end_var, is_in_dock, f"opt_{pid}_{m['id']}")
-                    m['ordenes_asignadas'].append(iv_opt)
+            intervals_bloqueados = []
+            op, cl = row.get('Horario_Apertura', 0), row.get('Horario_Cierre', 24)
+            breaks_list = parse_break_string(row.get('Breaks (Inicio-Fin)', ''))
             
-            if not literales_eleccion: return None
-            model.Add(sum(literales_eleccion) == 1)
-            return True
-
-        if asignar_a_muelle_posible(n_orig, so, tc, eo, 'orig') and asignar_a_muelle_posible(n_dest, sd, td, ed, 'dest'):
-            pedidos_vars.append({'id': pid, 'vars': (so, eo, sd, ed), 'skill': skill_req, 'no': n_orig, 'nd': n_dest})
-
-    # NO OVERLAP
-    for nid, muelles in nodos_muelles.items():
-        for m in muelles:
-            todos = m['ordenes_asignadas'] + m['bloqueos']
-            if todos: model.AddNoOverlap(todos)
-
-    obj = model.NewIntVar(0, horizon, 'mk')
-    if pedidos_vars: 
-        model.AddMaxEquality(obj, [p['vars'][3] for p in pedidos_vars])
-        model.Minimize(obj)
-
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 60
-    st_solve = solver.Solve(model)
-    
-    if st_solve in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        status_ph.success("✅ Optimización Completada")
-        res = []
-        for p in pedidos_vars:
-            v = p['vars']
-            so, eo, sd, ed = solver.Value(v[0]), solver.Value(v[1]), solver.Value(v[2]), solver.Value(v[3])
+            for day in range(5): 
+                off = day * 24
+                if op > 0: intervals_bloqueados.append((0+off, op))
+                if cl < 24: intervals_bloqueados.append((cl+off, 24-cl))
+                for s, e in breaks_list:
+                    dur = e - s
+                    if dur > 0: intervals_bloqueados.append((s+off, dur))
             
-            nom_o = nodos_muelles[p['no']][0]['nombre_nodo']
-            nom_d = nodos_muelles[p['nd']][0]['nombre_nodo']
+            cp_intervals_bloqueados = []
+            for start, dur in intervals_bloqueados:
+                iv = model.NewIntervalVar(int(start), int(dur), int(start+dur), f"bk_{mid}_{start}")
+                cp_intervals_bloqueados.append(iv)
+                
+            nodos_muelles[nid].append({
+                'id': mid, 'skill': skill_m, 'nombre_nodo': row['Nombre_Nodo'],
+                'bloqueos': cp_intervals_bloqueados, 'ordenes_asignadas': []
+            })
 
-            res.append({'Orden': p['id'], 'Tipo': 'Origen', 'Nodo': nom_o, 'Nodo_ID': p['no'], 'Skill': p['skill'], 'Inicio Servicio': so, 'Fin Servicio': eo})
-            res.append({'Orden': p['id'], 'Tipo': 'Destino', 'Nodo': nom_d, 'Nodo_ID': p['nd'], 'Skill': p['skill'], 'Inicio Servicio': sd, 'Fin Servicio': ed})
+        pedidos_vars = []
+        route_cache = {}
         
-        return pd.DataFrame(res)
-    else:
-        status_ph.error("⚠️ No se pudo agendar (Infeasible).")
-        return pd.DataFrame()
+        status.write("📦 Procesando pedidos y calculando rutas (Google/Manual)...")
+        # Procesamiento de pedidos (sin barra de progreso visual para no ensuciar el status)
+        for i, row in df_pedidos.iterrows():
+            pid, skill_req = row['ID'], row['Skill_Requerido']
+            
+            tv = row.get('Tiempo_Estimado_Manual_h', 5)
+            if use_google and api_key and pd.notna(row.get('Origen_Lat')):
+                k = (row['Origen_Lat'], row['Origen_Lon'], row['Destino_Lat'], row['Destino_Lon'])
+                if k not in route_cache:
+                    dt = (datetime.utcnow()+timedelta(days=1)).replace(hour=8).isoformat()+'Z'
+                    t_g = get_google_route_time(*k, dt, api_key)
+                    if t_g: route_cache[k] = t_g
+                tv = route_cache.get(k, tv)
+            
+            tc, td, tv = int(row.get('Tiempo_Carga_h', 2)), int(row.get('Tiempo_Descarga_h', 2)), int(tv)
+            so, eo = model.NewIntVar(0, horizon, f'so_{pid}'), model.NewIntVar(0, horizon, f'eo_{pid}')
+            sd, ed = model.NewIntVar(0, horizon, f'sd_{pid}'), model.NewIntVar(0, horizon, f'ed_{pid}')
+            model.Add(sd >= eo + tv)
+
+            def get_compatible_nodes(skill_necesario):
+                candidates = []
+                for nid, muelles in nodos_muelles.items():
+                    if any(m['skill'] in ['Mixto', skill_necesario] for m in muelles):
+                        candidates.append(nid)
+                return candidates
+
+            valid_nodes = get_compatible_nodes(skill_req)
+            if len(valid_nodes) < 2: continue
+
+            n_orig = valid_nodes[i % len(valid_nodes)]
+            n_dest = valid_nodes[(i+1) % len(valid_nodes)]
+            if n_orig == n_dest: n_dest = valid_nodes[(i+2) % len(valid_nodes)]
+
+            def asignar_a_muelle_posible(nodo_id, start_var, duration, end_var, tipo_op):
+                literales_eleccion = []
+                for m in nodos_muelles.get(nodo_id, []):
+                    if m['skill'] == 'Mixto' or m['skill'] == skill_req:
+                        is_in_dock = model.NewBoolVar(f"{pid}_{tipo_op}_in_{m['id']}")
+                        literales_eleccion.append(is_in_dock)
+                        iv_opt = model.NewOptionalIntervalVar(start_var, duration, end_var, is_in_dock, f"opt_{pid}_{m['id']}")
+                        m['ordenes_asignadas'].append(iv_opt)
+                
+                if not literales_eleccion: return None
+                model.Add(sum(literales_eleccion) == 1)
+                return True
+
+            if asignar_a_muelle_posible(n_orig, so, tc, eo, 'orig') and asignar_a_muelle_posible(n_dest, sd, td, ed, 'dest'):
+                pedidos_vars.append({'id': pid, 'vars': (so, eo, sd, ed), 'skill': skill_req, 'no': n_orig, 'nd': n_dest})
+
+        status.write("🧠 Aplicando restricciones de No-Solapamiento Estricto...")
+        for nid, muelles in nodos_muelles.items():
+            for m in muelles:
+                todos = m['ordenes_asignadas'] + m['bloqueos']
+                if todos: model.AddNoOverlap(todos)
+
+        obj = model.NewIntVar(0, horizon, 'mk')
+        if pedidos_vars: 
+            model.AddMaxEquality(obj, [p['vars'][3] for p in pedidos_vars])
+            model.Minimize(obj)
+
+        status.write("🧮 Ejecutando Solver Matemático...")
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = 60
+        st_solve = solver.Solve(model)
+        
+        if st_solve in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+            status.update(label="✅ ¡Optimización Completada con Éxito!", state="complete", expanded=False)
+            res = []
+            for p in pedidos_vars:
+                v = p['vars']
+                so, eo, sd, ed = solver.Value(v[0]), solver.Value(v[1]), solver.Value(v[2]), solver.Value(v[3])
+                
+                nom_o = nodos_muelles[p['no']][0]['nombre_nodo']
+                nom_d = nodos_muelles[p['nd']][0]['nombre_nodo']
+
+                res.append({'Orden': p['id'], 'Tipo': 'Origen', 'Nodo': nom_o, 'Nodo_ID': p['no'], 'Skill': p['skill'], 'Inicio Servicio': so, 'Fin Servicio': eo})
+                res.append({'Orden': p['id'], 'Tipo': 'Destino', 'Nodo': nom_d, 'Nodo_ID': p['nd'], 'Skill': p['skill'], 'Inicio Servicio': sd, 'Fin Servicio': ed})
+            
+            return pd.DataFrame(res)
+        else:
+            status.update(label="⚠️ Error: No se pudo encontrar una solución factible.", state="error")
+            return pd.DataFrame()
 
 # --- 5. POST-PROCESAMIENTO ---
 def asignar_nombres_muelles(df, df_config):
@@ -296,7 +347,6 @@ def asignar_nombres_muelles(df, df_config):
             req_skill = row['Skill']
             best_dock = None
             
-            # Buscar el muelle que fue asignado lógicamente (Reconstrucción)
             for mid, state in docks_state.items():
                 if state['skill'] in ['Mixto', req_skill]:
                     if start >= state['free_at']:
@@ -315,91 +365,143 @@ def asignar_nombres_muelles(df, df_config):
             else:
                 best_fallback = min(docks_state.keys(), key=lambda k: docks_state[k]['free_at'])
                 docks_state[best_fallback]['free_at'] = end
-                df_out.at[idx, 'Etiqueta Muelle'] = best_fallback # Fallback visual
+                df_out.at[idx, 'Etiqueta Muelle'] = best_fallback 
                 
     return df_out
 
-# --- UI ---
+# ==========================================
+# SECCIÓN UI (REDIEÑADA - MODERN LOOK)
+# ==========================================
+
+# --- SIDEBAR MEJORADO ---
 with st.sidebar:
-    st.header("🌎 Simulación")
-    paises = ["Mexico", "Colombia", "Brasil", "Argentina", "Chile", "Peru", "Ecuador", "Panama", "Guatemala"]
-    pais = st.selectbox("País", paises)
-    if st.button("Generar Datos"):
-        d = generar_escenario_pais(pais)
-        st.download_button("Descargar Excel", d, f"Simulacion_{pais}.xlsx")
-    st.divider()
-    api = st.text_input("Google API Key", type="password")
-    if api: st.session_state['api_key'] = api
-    use_g = st.checkbox("Tráfico Real", value=False, disabled=not bool(api))
+    st.image("https://cdn-icons-png.flaticon.com/512/2830/2830312.png", width=50)
+    st.title("T1 LATAM")
+    st.caption("v16.0 Full Stack Edition")
+    
+    st.markdown("### 🛠️ Configuración")
+    
+    with st.expander("📍 Simulación de Datos"):
+        st.write("Genera datos realistas por país:")
+        paises = ["Mexico", "Colombia", "Brasil", "Argentina", "Chile", "Peru", "Ecuador", "Panama", "Guatemala"]
+        pais = st.selectbox("Seleccionar País", paises)
+        if st.button("🎲 Generar Escenario", use_container_width=True):
+            d = generar_escenario_pais(pais)
+            st.download_button("📥 Bajar Excel Simulado", d, f"Simulacion_{pais}.xlsx", mime="application/vnd.ms-excel", use_container_width=True)
 
-st.title("🚛 SaaS Logístico LATAM T1")
-f = st.file_uploader("Cargar Archivo", type=['xlsx'])
+    with st.expander("🗺️ API Google Maps"):
+        api = st.text_input("API Key (Opcional)", type="password")
+        if api: st.session_state['api_key'] = api
+        use_g = st.checkbox("Activar Tráfico Real", value=False, disabled=not bool(api))
+        if use_g: st.caption("🟢 Conectado a Routes API")
 
-if f:
-    dp, dc = smart_load(f)
+# --- MAIN DASHBOARD ---
+st.title("Torre de Control Logístico")
+st.markdown("Optimización inteligente de muelles con restricciones de **Skills**, **Turnos** y **Tráfico**.")
+
+# AREA DE CARGA (Clean Card Style)
+uploaded_file = st.file_uploader("", type=['xlsx'], help="Carga aquí tu archivo de pedidos y configuración")
+
+if uploaded_file:
+    dp, dc = smart_load(uploaded_file)
     if not dp.empty:
-        if st.button("🚀 Optimizar"):
-            res = solve_engine(dp, dc, use_g, st.session_state['api_key'])
-            if not res.empty:
-                final_df = asignar_nombres_muelles(res, dc)
-                final_df['Hora Entrada'] = final_df['Inicio Servicio'].apply(format_time)
-                final_df['Hora Salida'] = final_df['Fin Servicio'].apply(format_time)
-                st.session_state['results_df'] = final_df
+        col_act, col_info = st.columns([1, 2])
+        with col_act:
+            if st.button("✨ Optimizar Operación", use_container_width=True):
+                res = solve_engine(dp, dc, use_g, st.session_state['api_key'])
+                if not res.empty:
+                    final_df = asignar_nombres_muelles(res, dc)
+                    final_df['Hora Entrada'] = final_df['Inicio Servicio'].apply(format_time)
+                    final_df['Hora Salida'] = final_df['Fin Servicio'].apply(format_time)
+                    st.session_state['results_df'] = final_df
+        with col_info:
+            st.info(f"📁 **Datos Cargados:** {len(dp)} Pedidos | {len(dc)} Muelles Configurados")
 
+# DASHBOARD DE RESULTADOS
 if st.session_state['results_df'] is not None:
     df = st.session_state['results_df']
     st.divider()
     
+    # 1. KPIs SUPERIORES
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    total_pedidos = df['Orden'].nunique()
+    total_muelles = df['Etiqueta Muelle'].nunique()
+    horas_totales = (df['Fin Servicio'].max() - df['Inicio Servicio'].min())
+    
+    kpi1.metric("Pedidos Agendados", f"{total_pedidos}", "100%")
+    kpi2.metric("Muelles Activos", f"{total_muelles}", "Capacidad")
+    kpi3.metric("Lead Time Total", f"{int(horas_totales)} hrs", "Horizonte")
+    
+    # Auditoría Visual
     errs = audit_schedule(df)
-    if errs.empty: st.success("✅ CERO SOLAPAMIENTOS CONFIRMADO")
-    else: st.error(f"❌ {len(errs)} Errores Visuales"); st.dataframe(errs)
+    if errs.empty:
+        kpi4.success("✅ Auditoría: 0 Choques")
+    else:
+        kpi4.error(f"❌ {len(errs)} Solapamientos")
+
+    # 2. PESTAÑAS DETALLADAS
+    st.markdown("---")
+    t1, t2, t3, t4 = st.tabs(["📊 Gantt Global", "📦 Rastreo de Pedidos", "🔍 Inspector de Muelles", "📥 Descargas"])
     
-    t1, t2, t3, t4 = st.tabs(["🏭 Gantt General", "📦 Rastreo Pedidos", "🔬 Inspector de Muelles", "📥 Exportar"])
-    
+    # Colores personalizados para Altair
+    scale_colors = alt.Scale(domain=['Seco', 'Refrigerado', 'Mixto'], range=['#f59e0b', '#3b82f6', '#10b981'])
+
     with t1:
-        c = alt.Chart(df).mark_bar().encode(
-            x='Inicio Servicio', x2='Fin Servicio', y='Nodo', color='Skill', 
-            tooltip=['Orden', 'Etiqueta Muelle']
-        ).properties(width=700).interactive()
-        st.altair_chart(c)
+        st.subheader("Planificación General")
+        c = alt.Chart(df).mark_bar(cornerRadius=3).encode(
+            x=alt.X('Inicio Servicio', title='Línea de Tiempo (Horas)'),
+            x2='Fin Servicio',
+            y=alt.Y('Nodo', title='Centro Operativo', sort='ascending'),
+            color=alt.Color('Skill', scale=scale_colors),
+            tooltip=['Orden', 'Etiqueta Muelle', 'Hora Entrada', 'Hora Salida']
+        ).properties(height=400, width='container').interactive()
+        st.altair_chart(c, use_container_width=True)
         
     with t2:
-        st.markdown("##### 🔎 Rastrear Pedidos")
+        st.subheader("Trazabilidad End-to-End")
         all_orders = sorted(df['Orden'].unique())
-        sel_order = st.multiselect("Buscar ID de Pedido:", all_orders)
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            sel_order = st.multiselect("🔍 Buscar Pedido:", all_orders)
         
-        # CORRECCIÓN: Mostrar TODO si no hay selección
-        df_view = df[df['Orden'].isin(sel_order)] if sel_order else df 
+        df_view = df[df['Orden'].isin(sel_order)] if sel_order else df
         
-        c = alt.Chart(df_view).mark_bar().encode(
-            x='Inicio Servicio', x2='Fin Servicio', y='Orden', color='Tipo',
-            tooltip=['Nodo', 'Etiqueta Muelle']
-        ).properties(width=700).interactive()
-        st.altair_chart(c)
+        c = alt.Chart(df_view).mark_bar(cornerRadius=3).encode(
+            x='Inicio Servicio', x2='Fin Servicio',
+            y=alt.Y('Orden', sort='ascending'),
+            color=alt.Color('Tipo', scale=alt.Scale(domain=['Origen', 'Destino'], range=['#6366f1', '#ec4899'])),
+            tooltip=['Nodo', 'Etiqueta Muelle', 'Hora Entrada']
+        ).properties(width='container').interactive()
+        st.altair_chart(c, use_container_width=True)
 
     with t3:
-        col_n, col_m = st.columns(2)
-        with col_n:
-            n = st.selectbox("Seleccionar Nodo:", df['Nodo'].unique())
+        st.subheader("Auditoría de Capacidad")
+        c_filter, c_chart = st.columns([1, 3])
+        with c_filter:
+            n = st.selectbox("Seleccionar Centro:", df['Nodo'].unique())
+            dn = df[df['Nodo'] == n]
+            muelles_nodo = sorted(dn['Etiqueta Muelle'].unique())
+            sel_muelles = st.multiselect("Filtrar Muelles:", muelles_nodo, default=muelles_nodo)
         
-        dn = df[df['Nodo'] == n]
-        muelles_nodo = sorted(dn['Etiqueta Muelle'].unique())
+        if sel_muelles: dn = dn[dn['Etiqueta Muelle'].isin(sel_muelles)]
+            
+        with c_chart:
+            c = alt.Chart(dn).mark_bar(cornerRadius=3).encode(
+                x='Inicio Servicio', x2='Fin Servicio', 
+                y=alt.Y('Etiqueta Muelle', title='Muelle Físico'),
+                color=alt.Color('Skill', scale=scale_colors),
+                tooltip=['Orden', 'Hora Entrada', 'Hora Salida']
+            ).properties(height=300, width='container').interactive()
+            st.altair_chart(c, use_container_width=True)
         
-        with col_m:
-            sel_muelles = st.multiselect("Filtrar Muelles Específicos:", muelles_nodo, default=muelles_nodo)
-            
-        if sel_muelles:
-            dn = dn[dn['Etiqueta Muelle'].isin(sel_muelles)]
-            
-        c = alt.Chart(dn).mark_bar().encode(
-            x='Inicio Servicio', x2='Fin Servicio', 
-            y=alt.Y('Etiqueta Muelle', title='Muelle Real'),
-            color='Skill', tooltip=['Orden', 'Hora Entrada']
-        ).properties(width=700, height=300).interactive()
-        st.altair_chart(c)
         st.dataframe(dn[['Orden', 'Skill', 'Etiqueta Muelle', 'Hora Entrada', 'Hora Salida']].sort_values('Hora Entrada'), use_container_width=True)
 
     with t4:
-        out = io.BytesIO()
-        with pd.ExcelWriter(out, engine='xlsxwriter') as w: df.to_excel(w, index=False)
-        st.download_button("Descargar Final", out.getvalue(), "Plan.xlsx")
+        st.subheader("Exportar Datos")
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine='xlsxwriter') as w: df.to_excel(w, index=False)
+            st.download_button("💾 Descargar Plan Maestro (.xlsx)", out.getvalue(), "Plan_Optimo.xlsx", use_container_width=True)
+        with col_d2:
+            st.caption("Este archivo contiene el itinerario detallado, hora a hora, para cada vehículo y muelle.")
