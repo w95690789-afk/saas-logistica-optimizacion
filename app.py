@@ -7,63 +7,30 @@ import requests
 import numpy as np 
 from datetime import datetime, timedelta
 
-# --- CONFIGURACIÓN DE PÁGINA Y ESTILOS ---
+# --- CONFIGURACIÓN DE PÁGINA (NOMBRE ACTUALIZADO) ---
 st.set_page_config(
-    page_title="T1 LATAM | Control Tower", 
+    page_title="T1 OptiDock Solver", 
     layout="wide", 
-    page_icon="🚛",
+    page_icon="🧠", # Icono de Cerebro/Algoritmo
     initial_sidebar_state="expanded"
 )
 
-# --- INYECCIÓN CSS (UX/UI) ---
+# --- INYECCIÓN CSS (UX/UI MANTENIDA) ---
 st.markdown("""
     <style>
-    /* Importar fuente moderna */
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-    
-    /* Encabezados */
-    h1, h2, h3 {
-        color: #0f172a; 
-    }
-    
-    /* Botones Primarios */
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    h1, h2, h3 { color: #0f172a; }
     .stButton>button {
-        background-color: #2563eb;
-        color: white;
-        border-radius: 8px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-        width: 100%;
+        background-color: #2563eb; color: white; border-radius: 8px; border: none;
+        padding: 0.5rem 1rem; font-weight: 600; transition: all 0.3s ease; width: 100%;
     }
-    .stButton>button:hover {
-        background-color: #1d4ed8;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    }
-    
-    /* Métricas */
+    .stButton>button:hover { background-color: #1d4ed8; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }
     div[data-testid="stMetric"] {
-        background-color: #f8fafc;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #e2e8f0;
-        box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+        background-color: #f8fafc; padding: 15px; border-radius: 10px;
+        border: 1px solid #e2e8f0; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.1);
     }
-    
-    /* Alertas */
-    .stAlert {
-        border-radius: 8px;
-    }
-    
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background-color: #f1f5f9;
-    }
+    section[data-testid="stSidebar"] { background-color: #f1f5f9; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -72,7 +39,7 @@ if 'results_df' not in st.session_state: st.session_state['results_df'] = None
 if 'api_key' not in st.session_state: st.session_state['api_key'] = ""
 
 # ==========================================
-# SECCIÓN LÓGICA (INTACTA - NO TOCAR)
+# SECCIÓN LÓGICA (100% INTACTA)
 # ==========================================
 
 # --- 1. MÓDULO GOOGLE MAPS ---
@@ -202,17 +169,15 @@ def audit_schedule(df):
             last_end, last_ord = r['Fin Servicio'], r['Orden']
     return pd.DataFrame(errors)
 
-# --- 4. MOTOR DE OPTIMIZACIÓN (LÓGICA INTACTA V15) ---
+# --- 4. MOTOR DE OPTIMIZACIÓN (INTACTO) ---
 def solve_engine(df_pedidos, df_config, use_google, api_key):
-    # Uso de st.status para feedback moderno en lugar de st.empty
-    with st.status("🚀 Iniciando Motor de Optimización T1...", expanded=True) as status:
+    with st.status("🚀 Iniciando T1 Solver...", expanded=True) as status:
         
-        status.write("⚙️ Configurando solver y horizonte temporal...")
+        status.write("⚙️ Inicializando modelo matemático CP-SAT...")
         model = cp_model.CpModel()
         horizon = 120 
         
-        # 1. PRE-PROCESAMIENTO
-        status.write("🏗️ Construyendo infraestructura de muelles y turnos...")
+        status.write("🏗️ Estructurando red de muelles y turnos...")
         nodos_muelles = {}
         
         for _, row in df_config.iterrows():
@@ -246,8 +211,7 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
         pedidos_vars = []
         route_cache = {}
         
-        status.write("📦 Procesando pedidos y calculando rutas (Google/Manual)...")
-        # Procesamiento de pedidos (sin barra de progreso visual para no ensuciar el status)
+        status.write("📦 Optimizando rutas y asignaciones...")
         for i, row in df_pedidos.iterrows():
             pid, skill_req = row['ID'], row['Skill_Requerido']
             
@@ -295,7 +259,7 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
             if asignar_a_muelle_posible(n_orig, so, tc, eo, 'orig') and asignar_a_muelle_posible(n_dest, sd, td, ed, 'dest'):
                 pedidos_vars.append({'id': pid, 'vars': (so, eo, sd, ed), 'skill': skill_req, 'no': n_orig, 'nd': n_dest})
 
-        status.write("🧠 Aplicando restricciones de No-Solapamiento Estricto...")
+        status.write("🧠 Resolviendo conflictos de horario (No-Overlap)...")
         for nid, muelles in nodos_muelles.items():
             for m in muelles:
                 todos = m['ordenes_asignadas'] + m['bloqueos']
@@ -306,13 +270,12 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
             model.AddMaxEquality(obj, [p['vars'][3] for p in pedidos_vars])
             model.Minimize(obj)
 
-        status.write("🧮 Ejecutando Solver Matemático...")
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = 60
         st_solve = solver.Solve(model)
         
         if st_solve in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            status.update(label="✅ ¡Optimización Completada con Éxito!", state="complete", expanded=False)
+            status.update(label="✅ Planificación Exitosa", state="complete", expanded=False)
             res = []
             for p in pedidos_vars:
                 v = p['vars']
@@ -326,7 +289,7 @@ def solve_engine(df_pedidos, df_config, use_google, api_key):
             
             return pd.DataFrame(res)
         else:
-            status.update(label="⚠️ Error: No se pudo encontrar una solución factible.", state="error")
+            status.update(label="⚠️ No se encontró solución factible.", state="error")
             return pd.DataFrame()
 
 # --- 5. POST-PROCESAMIENTO ---
@@ -373,12 +336,12 @@ def asignar_nombres_muelles(df, df_config):
 # SECCIÓN UI (REDIEÑADA - MODERN LOOK)
 # ==========================================
 
-# --- SIDEBAR MEJORADO (Logo CEDI) ---
+# --- SIDEBAR MEJORADO (Logo CEDI/Muelle) ---
 with st.sidebar:
-    # CAMBIO AQUI: Icono de Warehouse/CEDI
+    # NUEVO ICONO: Warehouse/CEDI (Más acorde a Primera Milla)
     st.image("https://cdn-icons-png.flaticon.com/512/2942/2942544.png", width=60) 
-    st.title("T1 LATAM")
-    st.caption("v16.1 Full Stack Edition")
+    st.title("T1 OptiDock")
+    st.caption("Algorithm: Google OR-Tools")
     
     st.markdown("### 🛠️ Configuración")
     
@@ -397,8 +360,8 @@ with st.sidebar:
         if use_g: st.caption("🟢 Conectado a Routes API")
 
 # --- MAIN DASHBOARD ---
-st.title("Torre de Control Logístico")
-st.markdown("Optimización inteligente de muelles con restricciones de **Skills**, **Turnos** y **Tráfico**.")
+st.title("T1 OptiDock Solver")
+st.markdown("Motor algorítmico para planificación de **Primera Milla** y **Patios**.")
 
 # AREA DE CARGA (Clean Card Style)
 uploaded_file = st.file_uploader("", type=['xlsx'], help="Carga aquí tu archivo de pedidos y configuración")
@@ -408,7 +371,7 @@ if uploaded_file:
     if not dp.empty:
         col_act, col_info = st.columns([1, 2])
         with col_act:
-            if st.button("✨ Optimizar Operación", use_container_width=True):
+            if st.button("✨ Ejecutar Algoritmo", use_container_width=True):
                 res = solve_engine(dp, dc, use_g, st.session_state['api_key'])
                 if not res.empty:
                     final_df = asignar_nombres_muelles(res, dc)
@@ -430,8 +393,8 @@ if st.session_state['results_df'] is not None:
     horas_totales = (df['Fin Servicio'].max() - df['Inicio Servicio'].min())
     
     kpi1.metric("Pedidos Agendados", f"{total_pedidos}", "100%")
-    kpi2.metric("Muelles Activos", f"{total_muelles}", "Capacidad")
-    kpi3.metric("Lead Time Total", f"{int(horas_totales)} hrs", "Horizonte")
+    kpi2.metric("Muelles Activos", f"{total_muelles}", "Recursos")
+    kpi3.metric("Makespan", f"{int(horas_totales)} hrs", "Eficiencia")
     
     # Auditoría Visual
     errs = audit_schedule(df)
